@@ -83,10 +83,20 @@ function Invoke-ManagerCapture {
     } finally {
         Pop-Location
     }
+    $stdoutText = [string]::Empty
+    $stderrText = [string]::Empty
+    if (Test-Path -LiteralPath $stdout) {
+        $captured = Get-Content -LiteralPath $stdout -Raw
+        if ($null -ne $captured) { $stdoutText = [string]$captured }
+    }
+    if (Test-Path -LiteralPath $stderr) {
+        $captured = Get-Content -LiteralPath $stderr -Raw
+        if ($null -ne $captured) { $stderrText = [string]$captured }
+    }
     [pscustomobject]@{
         Code = $code
-        Stdout = if (Test-Path -LiteralPath $stdout) { [string](Get-Content -LiteralPath $stdout -Raw) } else { '' }
-        Stderr = if (Test-Path -LiteralPath $stderr) { [string](Get-Content -LiteralPath $stderr -Raw) } else { '' }
+        Stdout = $stdoutText
+        Stderr = $stderrText
     }
 }
 
