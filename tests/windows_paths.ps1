@@ -217,7 +217,7 @@ try {
     )
     $unlinkAliases = Invoke-ManagerCapture 'unlink-aliases' $conflictDir @('unlink')
     Assert-Equal $unlinkAliases.Code 0 'unlink aliases exit'
-    Assert-Equal (Get-Content -LiteralPath $linksFile -Raw) '' 'unlink did not remove all equivalent aliases'
+    Assert-Equal ([IO.File]::ReadAllText($linksFile)) '' 'unlink did not remove all equivalent aliases'
 
     Write-Host 'Windows path identity acceptance tests passed.'
 } finally {
