@@ -634,6 +634,31 @@ _claude_acc_list() {
     fi
 }
 
+# Keep inherited Claude credentials, provider selectors, and routing overrides
+# from replacing the account selected by CLAUDE_CONFIG_DIR. This list mirrors
+# src/environment.rs. Generic AWS_*, GOOGLE_*, AZURE_*, PATH, HOME, and
+# USERPROFILE variables are intentionally preserved.
+_claude_acc_scrub_auth_env() {
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
+        AWS_BEARER_TOKEN_BEDROCK ANTHROPIC_AWS_API_KEY \
+        ANTHROPIC_FOUNDRY_API_KEY ANTHROPIC_FOUNDRY_AUTH_TOKEN \
+        CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_BEDROCK \
+        CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_MANTLE \
+        CLAUDE_CODE_USE_VERTEX ANTHROPIC_PROFILE \
+        ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID \
+        ANTHROPIC_WORKSPACE_ID CLAUDE_CODE_OAUTH_REFRESH_TOKEN \
+        CLAUDE_CODE_OAUTH_SCOPES ANTHROPIC_BASE_URL \
+        ANTHROPIC_AWS_BASE_URL ANTHROPIC_AWS_WORKSPACE_ID \
+        ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_BEDROCK_MANTLE_BASE_URL \
+        ANTHROPIC_BEDROCK_REGION_PREFIX ANTHROPIC_CUSTOM_HEADERS \
+        ANTHROPIC_FOUNDRY_BASE_URL ANTHROPIC_FOUNDRY_RESOURCE \
+        ANTHROPIC_VERTEX_BASE_URL ANTHROPIC_VERTEX_PROJECT_ID \
+        CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH CLAUDE_CODE_SKIP_BEDROCK_AUTH \
+        CLAUDE_CODE_SKIP_FOUNDRY_AUTH CLAUDE_CODE_SKIP_MANTLE_AUTH \
+        CLAUDE_CODE_SKIP_VERTEX_AUTH \
+        CLAUDE_SECURESTORAGE_CONFIG_DIR
+}
+
 _claude_acc_add() {
     local seed_flag=0 name=""
     while (( $# > 0 )); do
@@ -670,8 +695,7 @@ _claude_acc_add() {
     # A leaked ANTHROPIC_API_KEY etc. can make `claude auth login` skip the
     # OAuth flow entirely, or auth a different identity than acc_dir intends.
     (
-        unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
-            CLAUDE_CODE_OAUTH_TOKEN AWS_BEARER_TOKEN_BEDROCK
+        _claude_acc_scrub_auth_env
         CLAUDE_CONFIG_DIR="$acc_dir" claude auth login
     )
     # Record which account this directory now belongs to, so a later
@@ -699,8 +723,8 @@ _claude_acc_login() {
         # *different* account, this login is meant to change the standard
         # account's own credentials.
         (
-            unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
-                CLAUDE_CODE_OAUTH_TOKEN AWS_BEARER_TOKEN_BEDROCK
+            unset CLAUDE_CONFIG_DIR
+            _claude_acc_scrub_auth_env
             CLAUDE_ACC_RUN_DEFAULT=1 claude auth login
         )
         _claude_acc_lock_after_login "default"
@@ -1132,8 +1156,8 @@ _claude_acc_run() {
         # CLAUDE_CONFIG_DIR from $PWD — otherwise it would silently undo
         # this explicit default run inside a linked directory.
         (
-            unset CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
-                CLAUDE_CODE_OAUTH_TOKEN AWS_BEARER_TOKEN_BEDROCK
+            unset CLAUDE_CONFIG_DIR
+            _claude_acc_scrub_auth_env
             CLAUDE_ACC_RUN_DEFAULT=1 command claude "$@"
         )
         return $?
@@ -1148,8 +1172,7 @@ _claude_acc_run() {
     fi
 
     (
-        unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
-            CLAUDE_CODE_OAUTH_TOKEN AWS_BEARER_TOKEN_BEDROCK
+        _claude_acc_scrub_auth_env
         CLAUDE_CONFIG_DIR="$acc_dir" command claude "$@"
     )
 }

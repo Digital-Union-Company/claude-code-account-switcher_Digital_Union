@@ -58,3 +58,8 @@ jobs:
 
       - name: cargo test
         run: cargo test --release
+
+      - name: Windows secure launcher acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows_launcher.ps1 -Binary ./target/release/claude-acc.exe

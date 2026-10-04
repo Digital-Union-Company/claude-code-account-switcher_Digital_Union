@@ -1,423 +1,317 @@
-// Hardened `claude` invocation for Windows.
-//
-// `claude` on Windows almost always resolves to an npm-installed `claude.cmd`
-// shim, not a real .exe. Windows' CreateProcess has OS-level special-casing
-// for launching a .cmd/.bat target: it implicitly re-runs the command line
-// through cmd.exe, even when the caller only ever passed a structured argv
-// (no shell involved on the caller's side). cmd.exe's own command-line
-// parsing has quirks — most notably `%...%` percent-expansion and `&`/`|`/`^`
-// metacharacters — that a plain argv-quoting scheme doesn't protect against.
-// This is the exact same OS-level footgun behind Node's CVE-2024-27980
-// (`child_process.spawn` invoking a .cmd/.bat file).
-//
-// Ported from github.com/stablyai/orca's `buildWindowsCommandInvocation` /
-// `quoteCmdToken` (src/main/claude-accounts/windows-command-invocation.ts):
-// rather than relying on whatever CreateProcess does implicitly, explicitly
-// build the `cmd.exe /d /v:off /s /c "..."` invocation ourselves, with every
-// token quoted so cmd.exe's own parser can't reinterpret it.
-//
-// The quoting logic below is only *called* from the `#[cfg(windows)]` half
-// of `claude_command`, but is deliberately not itself gated on `windows` so
-// it gets real unit-test coverage on every CI platform, not just the
-// windows-latest runner. `allow(dead_code)` off Windows reflects that: it's
-// unused in that build's production path, not actually dead.
+//! Windows executable resolution and the compatibility boundary for unknown
+//! `.cmd`/`.bat` Claude launchers.
+//!
+//! Resolution searches absolute PATH entries only, never the working
+//! directory, and returns one concrete path. Native `.exe`/`.com` files are
+//! spawned directly by `claude_process`. A recognized npm installation runs
+//! its exact `node_modules/@anthropic-ai/claude-code/cli.js` through a concrete
+//! Node executable. Only an unknown batch launcher reaches cmd.exe.
+
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedClaude {
+    Native(PathBuf),
+    Npm { node: PathBuf, cli: PathBuf },
+    Batch(PathBuf),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InvocationError {
+    UnsupportedArg(String),
+    InvalidComSpec,
+}
 
 pub struct WindowsCommandInvocation {
-    pub command: String,
-    pub args: Vec<String>,
+    pub command: PathBuf,
+    pub args: Vec<OsString>,
 }
 
-/// Why an invocation couldn't be built. A type rather than a `String` so the
-/// message can be written in the user's language: the earlier reason was
-/// English no matter what, and showed up embedded in a Russian sentence.
-#[derive(Debug, PartialEq)]
-pub enum InvocationError {
-    /// A token cmd.exe cannot carry at all. Holds the offending token.
-    UnsupportedArg(String),
-}
-
-/// Quotes a single command-line token for safe embedding inside the
-/// double-quoted string cmd.exe receives after `/c`. Rejects tokens
-/// containing `"` or a line break outright — there's no way to embed those
-/// safely in a `cmd.exe /c "..."` command line at all.
-fn quote_cmd_token(value: &str) -> Result<String, InvocationError> {
-    if value.contains('\r') || value.contains('\n') || value.contains('"') {
-        return Err(InvocationError::UnsupportedArg(value.to_string()));
-    }
-    // MSVCRT/CommandLineToArgvW rule: backslashes immediately before a
-    // closing quote must be doubled, or they'd escape the quote instead of
-    // terminating literally.
-    let trailing_backslashes = value.chars().rev().take_while(|&c| c == '\\').count();
-    let mut crt_escaped = value.to_string();
-    crt_escaped.push_str(&"\\".repeat(trailing_backslashes));
-    // cmd.exe still expands %VAR% inside a double-quoted string. Briefly
-    // close the quote around each `%` and caret-escape it — caret escaping
-    // only works outside quotes — then reopen the quote.
-    let percent_escaped = crt_escaped.replace('%', "\"^%\"");
-    Ok(format!("\"{percent_escaped}\""))
-}
-
-/// Builds a `cmd.exe /d /v:off /s /c "<command> <args...>"` invocation with
-/// every token quoted against cmd.exe's own parsing. `command`/`args` are
-/// the *real* argv you want to run (e.g. `"claude"`, `["auth", "login"]`) —
-/// this function handles wrapping it for cmd.exe, not the other way round.
-pub fn build_windows_command_invocation(
-    command: &str,
-    args: &[String],
-) -> Result<WindowsCommandInvocation, InvocationError> {
-    let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
-    let mut tokens = Vec::with_capacity(args.len() + 1);
-    tokens.push(quote_cmd_token(command)?);
-    for a in args {
-        tokens.push(quote_cmd_token(a)?);
-    }
-    let command_line = tokens.join(" ");
-    Ok(WindowsCommandInvocation {
-        command: comspec,
-        args: vec![
-            "/d".to_string(),
-            "/v:off".to_string(),
-            "/s".to_string(),
-            "/c".to_string(),
-            format!("\"{command_line}\""),
-        ],
-    })
-}
-
-/// Builds a `Command` that runs `claude <args>`, hardened against the
-/// Windows .cmd-shim quoting footgun on Windows and a plain
-/// `Command::new("claude").args(args)` everywhere else. Callers still set
-/// env vars on the returned `Command` as usual.
-///
-/// `Err` carries a message fit to show a user: a token that cannot be
-/// represented on a `cmd.exe` command line at all. Falling back to
-/// `Command::new("claude")` there was the first design, and it is wrong for
-/// the case this whole module exists for — that call finds no `.cmd` shim,
-/// so the user got `program not found` instead of the reason.
-#[cfg(windows)]
-pub fn claude_command(args: &[String]) -> Result<Command, InvocationError> {
-    use std::os::windows::process::CommandExt;
-    let invocation = build_windows_command_invocation("claude", args)?;
-    let mut cmd = Command::new(&invocation.command);
-    for a in &invocation.args {
-        // `raw_arg` appends the token exactly as given — no further quoting
-        // from Rust — matching Node's `windowsVerbatimArguments: true`. We
-        // already fully quoted each piece above; a second layer of quoting
-        // would corrupt it.
-        cmd.raw_arg(a);
-    }
-    Ok(cmd)
-}
-
-#[cfg(not(windows))]
-pub fn claude_command(args: &[String]) -> Result<Command, InvocationError> {
-    let mut cmd = Command::new("claude");
-    cmd.args(args);
-    Ok(cmd)
-}
-
-/// Whether `claude` is anywhere `cmd.exe` would look for it.
-///
-/// Only used to say so plainly. cmd.exe still does the real resolution — this
-/// does not override its choice — but a missing `claude` there surfaces as
-/// `'"claude"' is not recognized` on stderr and exit 1, indistinguishable
-/// from claude itself failing.
-#[cfg(windows)]
-pub fn claude_is_findable() -> bool {
-    let cwd = cwd_is_searched(std::env::var_os("NoDefaultCurrentDirectoryInExePath").as_deref())
-        .then(|| std::env::current_dir().ok())
-        .flatten();
-    find_executable(
-        "claude",
-        cwd.as_deref(),
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("PATHEXT").as_deref(),
-    )
-    .is_some()
-}
-
-/// Whether `cmd.exe` will look in the current directory at all.
-///
-/// It normally does, and first — but `NoDefaultCurrentDirectoryInExePath`
-/// turns that off, and its mere presence is what counts, not its value.
-/// Ignoring it made this predict "findable" for a `claude` that only exists
-/// in the current directory, and then `cmd.exe` wouldn't run it — leaving the
-/// user with exactly the raw `'"claude"' is not recognized` this is meant to
-/// replace. Found on a machine where the variable was set without anyone
-/// setting it deliberately.
-fn cwd_is_searched(no_default_current_directory: Option<&OsStr>) -> bool {
-    no_default_current_directory.is_none()
-}
-
-/// Where `cmd.exe` would find `name`: `cwd` first when the caller passes one,
-/// then each PATH entry, trying the bare name and then each PATHEXT
-/// extension. Whether the current directory belongs in that search is the
-/// caller's call — see `cwd_is_searched`.
-///
-/// Rust's own `Command::new` does none of this — it looks for a literal
-/// `claude`/`claude.exe` and so never finds the `claude.cmd` an npm install
-/// leaves, which is why `run`/`add`/`login` used to die with
-/// `program not found` on the commonest Windows setup.
-///
-/// Pure, so the search order is testable on any platform.
-pub fn find_executable(
-    name: &str,
-    cwd: Option<&Path>,
+/// Resolve Claude once from trusted PATH entries. Relative and empty PATH
+/// entries are ignored because Windows interprets them relative to cwd. The
+/// manager-owned shim directory is excluded to prevent recursion now and when
+/// the Windows shim is introduced in a later stage.
+pub fn resolve_claude(
     path: Option<&OsStr>,
     pathext: Option<&OsStr>,
+    excluded_dir: Option<&Path>,
+) -> Option<ResolvedClaude> {
+    let executable = find_executable("claude", path, pathext, excluded_dir)?;
+    let extension = executable
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "exe" | "com" => Some(ResolvedClaude::Native(executable)),
+        "cmd" | "bat" => recognize_npm_installation(&executable, path, excluded_dir)
+            .unwrap_or(ResolvedClaude::Batch(executable)),
+        _ => None,
+    }
+}
+
+/// Recognize only npm's deterministic global layout beside its generated
+/// `claude.cmd`: `<shim-dir>/node_modules/@anthropic-ai/claude-code/cli.js`.
+/// No package paths are inferred from the shim's text.
+fn recognize_npm_installation(
+    shim: &Path,
+    path: Option<&OsStr>,
+    excluded_dir: Option<&Path>,
+) -> Option<ResolvedClaude> {
+    let cli = shim
+        .parent()?
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+        .join("cli.js");
+    if !cli.is_file() {
+        return None;
+    }
+
+    let adjacent_node = shim.parent()?.join("node.exe");
+    let node = if adjacent_node.is_file() {
+        adjacent_node
+    } else {
+        find_native_executable("node", path, excluded_dir)?
+    };
+    Some(ResolvedClaude::Npm { node, cli })
+}
+
+fn find_native_executable(
+    name: &str,
+    path: Option<&OsStr>,
+    excluded_dir: Option<&Path>,
 ) -> Option<PathBuf> {
-    let extensions: Vec<String> = pathext
-        .map(|v| v.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string())
+    find_executable(
+        name,
+        path,
+        Some(OsStr::new(".EXE;.COM")),
+        excluded_dir,
+    )
+}
+
+/// Search PATH in order without consulting cwd. Only absolute entries are
+/// accepted, and the returned path is made absolute/canonical where possible.
+pub fn find_executable(
+    name: &str,
+    path: Option<&OsStr>,
+    pathext: Option<&OsStr>,
+    excluded_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let extensions: Vec<OsString> = pathext
+        .unwrap_or_else(|| OsStr::new(".COM;.EXE;.BAT;.CMD"))
+        .to_string_lossy()
         .split(';')
-        .filter(|e| !e.is_empty())
-        .map(|e| e.to_string())
+        .filter(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                ".com" | ".exe" | ".bat" | ".cmd"
+            )
+        })
+        .map(OsString::from)
         .collect();
 
-    let dirs = cwd
-        .map(|d| d.to_path_buf())
-        .into_iter()
-        .chain(path.map(std::env::split_paths).into_iter().flatten());
-
-    for dir in dirs {
-        let base = dir.join(name);
-        // A name that already carries its own extension is used as given —
-        // that is what `cmd.exe` does too.
-        if base.is_file() {
-            return Some(base);
+    for dir in path.into_iter().flat_map(std::env::split_paths) {
+        if !dir.is_absolute() || same_directory(&dir, excluded_dir) {
+            continue;
         }
-        for ext in &extensions {
-            let candidate = dir.join(format!("{}{}", name, ext));
+        for extension in &extensions {
+            let mut file_name = OsString::from(name);
+            file_name.push(extension);
+            let candidate = dir.join(file_name);
             if candidate.is_file() {
-                return Some(candidate);
+                return Some(absolute_path(candidate));
             }
         }
     }
     None
 }
 
+fn absolute_path(path: PathBuf) -> PathBuf {
+    fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn same_directory(candidate: &Path, excluded: Option<&Path>) -> bool {
+    let Some(excluded) = excluded else {
+        return false;
+    };
+    let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    let excluded = fs::canonicalize(excluded).unwrap_or_else(|_| excluded.to_path_buf());
+    if cfg!(windows) {
+        candidate
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&excluded.to_string_lossy())
+    } else {
+        candidate == excluded
+    }
+}
+
+/// Build the only cmd.exe command line retained by R1. This is exclusively for
+/// unknown batch launchers. Tokens that cmd.exe cannot carry safely are
+/// rejected explicitly rather than being silently changed.
+pub fn build_batch_invocation(
+    script: &Path,
+    args: &[OsString],
+    comspec: Option<&OsStr>,
+) -> Result<WindowsCommandInvocation, InvocationError> {
+    let comspec = comspec
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.is_absolute()
+                && path.is_file()
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+        })
+        .ok_or(InvocationError::InvalidComSpec)?;
+
+    let mut tokens = Vec::with_capacity(args.len() + 1);
+    tokens.push(quote_safe_batch_token(script.as_os_str())?);
+    for arg in args {
+        tokens.push(quote_safe_batch_token(arg)?);
+    }
+    let command_line = tokens.join(" ");
+    Ok(WindowsCommandInvocation {
+        command: comspec,
+        args: vec![
+            OsString::from("/d"),
+            OsString::from("/v:off"),
+            OsString::from("/s"),
+            OsString::from("/c"),
+            OsString::from(format!("\"{command_line}\"")),
+        ],
+    })
+}
+
+fn quote_safe_batch_token(value: &OsStr) -> Result<String, InvocationError> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| InvocationError::UnsupportedArg(value.to_string_lossy().into_owned()))?;
+    if value.chars().any(|c| matches!(c, '\r' | '\n' | '"')) {
+        return Err(InvocationError::UnsupportedArg(value.to_string()));
+    }
+    let trailing_backslashes = value.chars().rev().take_while(|&c| c == '\\').count();
+    let mut crt_escaped = value.to_string();
+    crt_escaped.push_str(&"\\".repeat(trailing_backslashes));
+    let percent_escaped = crt_escaped.replace('%', "\"^%\"");
+    Ok(format!("\"{percent_escaped}\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::fs;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cc-winpath-{}-{}", tag, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cc-r1-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn os(v: &str) -> OsString {
-        OsString::from(v)
-    }
-
-    // These tests pass PATHEXT in the same case as the files they create, so
-    // they assert search *order* on any filesystem rather than accidentally
-    // testing case sensitivity — Linux is case-sensitive and would fail on a
-    // `.CMD` candidate for a `claude.cmd` file, while Windows and macOS would
-    // not. Real Windows PATHEXT is uppercase, and matching a lowercase file
-    // there works because the filesystem is case-insensitive; that is why the
-    // search doesn't pay for a directory scan to normalise it.
-
     #[test]
-    fn the_current_directory_is_dropped_when_windows_says_to_skip_it() {
-        // Its presence is the switch, whatever it holds — including empty.
-        assert!(cwd_is_searched(None));
-        assert!(!cwd_is_searched(Some(&os("1"))));
-        assert!(!cwd_is_searched(Some(&os(""))));
-        assert!(!cwd_is_searched(Some(&os("anything at all"))));
+    fn path_search_never_uses_cwd_or_relative_entries() {
+        let root = scratch("no-cwd");
+        let trusted = root.join("trusted");
+        fs::create_dir_all(&trusted).unwrap();
+        fs::write(root.join("claude.exe"), "decoy").unwrap();
+        fs::write(trusted.join("claude.exe"), "intended").unwrap();
+        let path = std::env::join_paths([Path::new("."), trusted.as_path()]).unwrap();
+        let found = find_executable("claude", Some(&path), Some(OsStr::new(".exe")), None);
+        assert_eq!(found, fs::canonicalize(trusted.join("claude.exe")).ok());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn a_cmd_shim_is_found_where_rusts_own_lookup_finds_nothing() {
-        // The whole bug: `Command::new("claude")` looks for a literal
-        // `claude`/`claude.exe`, so an npm install's `claude.cmd` was
-        // invisible and every run/add/login died with `program not found`.
-        let dir = scratch("shim");
-        fs::write(dir.join("claude.cmd"), "@echo off").unwrap();
+    fn manager_shim_directory_is_excluded() {
+        let root = scratch("excluded");
+        let shim = root.join("manager-bin");
+        let real = root.join("real-bin");
+        fs::create_dir_all(&shim).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(shim.join("claude.exe"), "shim").unwrap();
+        fs::write(real.join("claude.exe"), "real").unwrap();
+        let path = std::env::join_paths([shim.as_path(), real.as_path()]).unwrap();
         let found = find_executable(
             "claude",
-            None,
-            Some(&os(dir.to_str().unwrap())),
-            Some(&os(".com;.exe;.bat;.cmd")),
+            Some(&path),
+            Some(OsStr::new(".exe")),
+            Some(&shim),
         );
-        assert_eq!(found, Some(dir.join("claude.cmd")));
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(found, fs::canonicalize(real.join("claude.exe")).ok());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn pathext_order_decides_between_two_candidates() {
-        let dir = scratch("order");
-        fs::write(dir.join("claude.cmd"), "").unwrap();
-        fs::write(dir.join("claude.exe"), "").unwrap();
-        let path = os(dir.to_str().unwrap());
-        assert_eq!(
-            find_executable("claude", None, Some(&path), Some(&os(".exe;.cmd"))),
-            Some(dir.join("claude.exe"))
-        );
-        assert_eq!(
-            find_executable("claude", None, Some(&path), Some(&os(".cmd;.exe"))),
-            Some(dir.join("claude.cmd"))
-        );
-        let _ = fs::remove_dir_all(&dir);
+    fn native_extensions_resolve_for_direct_execution() {
+        let root = scratch("native");
+        fs::write(root.join("claude.exe"), "native").unwrap();
+        let path = std::env::join_paths([root.as_path()]).unwrap();
+        let resolved = resolve_claude(Some(&path), Some(OsStr::new(".exe;.cmd")), None);
+        assert!(matches!(resolved, Some(ResolvedClaude::Native(_))));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn the_current_directory_is_searched_before_path() {
-        // cmd.exe looks there first, so a lookup that didn't would pick a
-        // different file than the shell would have.
-        let base = scratch("cwd");
-        let here = base.join("here");
-        let elsewhere = base.join("elsewhere");
-        fs::create_dir_all(&here).unwrap();
-        fs::create_dir_all(&elsewhere).unwrap();
-        fs::write(here.join("claude.cmd"), "").unwrap();
-        fs::write(elsewhere.join("claude.cmd"), "").unwrap();
-        assert_eq!(
-            find_executable(
-                "claude",
-                Some(&here),
-                Some(&os(elsewhere.to_str().unwrap())),
-                Some(&os(".cmd"))
-            ),
-            Some(here.join("claude.cmd"))
-        );
-        let _ = fs::remove_dir_all(&base);
+    fn deterministic_npm_layout_runs_cli_js_directly() {
+        let root = scratch("npm");
+        let cli = root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("cli.js");
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        fs::write(root.join("claude.cmd"), "npm shim text is not parsed").unwrap();
+        fs::write(root.join("node.exe"), "node").unwrap();
+        fs::write(&cli, "cli").unwrap();
+        let path = std::env::join_paths([root.as_path()]).unwrap();
+        let resolved = resolve_claude(Some(&path), Some(OsStr::new(".cmd")), None);
+        let Some(ResolvedClaude::Npm { node, cli: found_cli }) = resolved else {
+            panic!("npm layout was not recognized");
+        };
+        assert_eq!(fs::canonicalize(node).unwrap(), fs::canonicalize(root.join("node.exe")).unwrap());
+        assert_eq!(fs::canonicalize(found_cli).unwrap(), fs::canonicalize(cli).unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn path_entries_are_tried_in_order() {
-        let base = scratch("path-order");
-        let first = base.join("first");
-        let second = base.join("second");
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-        fs::write(second.join("claude.cmd"), "").unwrap();
-        let path = std::env::join_paths([&first, &second]).unwrap();
-        assert_eq!(
-            find_executable("claude", None, Some(&path), Some(&os(".cmd"))),
-            Some(second.join("claude.cmd")),
-            "an empty earlier entry must not stop the search"
-        );
-        let _ = fs::remove_dir_all(&base);
+    fn unknown_batch_launcher_stays_a_compatibility_fallback() {
+        let root = scratch("batch");
+        fs::write(root.join("claude.cmd"), "unknown").unwrap();
+        let path = std::env::join_paths([root.as_path()]).unwrap();
+        let resolved = resolve_claude(Some(&path), Some(OsStr::new(".cmd")), None);
+        assert!(matches!(resolved, Some(ResolvedClaude::Batch(_))));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn a_name_that_carries_its_own_extension_is_used_as_given() {
-        let dir = scratch("explicit");
-        fs::write(dir.join("claude.cmd"), "").unwrap();
-        assert_eq!(
-            find_executable(
-                "claude.cmd",
-                None,
-                Some(&os(dir.to_str().unwrap())),
-                Some(&os(".EXE"))
-            ),
-            Some(dir.join("claude.cmd"))
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn nothing_anywhere_is_none_rather_than_a_guess() {
-        let dir = scratch("absent");
-        assert_eq!(
-            find_executable(
-                "claude",
-                None,
-                Some(&os(dir.to_str().unwrap())),
-                Some(&os(".cmd"))
-            ),
-            None
-        );
-        assert_eq!(find_executable("claude", None, None, None), None);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_directory_named_like_the_binary_is_not_mistaken_for_it() {
-        let dir = scratch("dir-trap");
-        fs::create_dir_all(dir.join("claude.cmd")).unwrap();
-        assert_eq!(
-            find_executable(
-                "claude",
-                None,
-                Some(&os(dir.to_str().unwrap())),
-                Some(&os(".cmd"))
-            ),
-            None
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn quote_cmd_token_wraps_plain_value_in_quotes() {
-        assert_eq!(quote_cmd_token("work").unwrap(), "\"work\"");
-    }
-
-    #[test]
-    fn quote_cmd_token_rejects_embedded_quote() {
-        assert!(quote_cmd_token("a\"b").is_err());
-    }
-
-    #[test]
-    fn quote_cmd_token_rejects_line_breaks() {
-        assert!(quote_cmd_token("a\nb").is_err());
-        assert!(quote_cmd_token("a\rb").is_err());
-    }
-
-    #[test]
-    fn quote_cmd_token_doubles_trailing_backslashes() {
-        // One trailing backslash must become two, or it would escape the
-        // closing quote instead of terminating literally before it.
-        assert_eq!(quote_cmd_token("C:\\path\\").unwrap(), "\"C:\\path\\\\\"");
-    }
-
-    #[test]
-    fn quote_cmd_token_leaves_interior_backslashes_alone() {
-        assert_eq!(
-            quote_cmd_token("C:\\path\\to\\x").unwrap(),
-            "\"C:\\path\\to\\x\""
-        );
-    }
-
-    #[test]
-    fn quote_cmd_token_escapes_percent_to_defeat_expansion() {
-        assert_eq!(quote_cmd_token("50%").unwrap(), "\"50\"^%\"\"");
-    }
-
-    #[test]
-    fn quote_cmd_token_handles_metacharacters_as_plain_text() {
-        // These would be shell metacharacters to a naive cmd.exe invocation
-        // (command chaining, piping, escaping) — quoting must neutralize
-        // them, not merely pass them through.
-        for value in ["a&b", "a|b", "a^b", "a<b", "a>b"] {
-            let quoted = quote_cmd_token(value).unwrap();
-            assert_eq!(quoted, format!("\"{value}\""));
+    fn unsafe_batch_arguments_fail_explicitly() {
+        for arg in ["a\"b", "a\nb", "a\rb"] {
+            assert!(matches!(
+                quote_safe_batch_token(OsStr::new(arg)),
+                Err(InvocationError::UnsupportedArg(_))
+            ));
         }
     }
 
     #[test]
-    fn build_windows_command_invocation_quotes_every_token() {
-        let invocation =
-            build_windows_command_invocation("claude", &["auth".to_string(), "login".to_string()])
-                .unwrap();
-        assert_eq!(invocation.args[0], "/d");
-        assert_eq!(invocation.args[1], "/v:off");
-        assert_eq!(invocation.args[2], "/s");
-        assert_eq!(invocation.args[3], "/c");
-        assert_eq!(invocation.args[4], "\"\"claude\" \"auth\" \"login\"\"");
-    }
-
-    #[test]
-    fn build_windows_command_invocation_rejects_unsafe_arg() {
-        assert!(build_windows_command_invocation("claude", &["bad\"arg".to_string()]).is_err());
+    fn safe_batch_arguments_are_quoted_without_value_changes() {
+        assert_eq!(
+            quote_safe_batch_token(OsStr::new("b c")).unwrap(),
+            "\"b c\""
+        );
+        assert_eq!(
+            quote_safe_batch_token(OsStr::new("C:\\path\\")).unwrap(),
+            "\"C:\\path\\\\\""
+        );
+        assert_eq!(
+            quote_safe_batch_token(OsStr::new("50% & safe")).unwrap(),
+            "\"50\"^%\" & safe\""
+        );
     }
 }

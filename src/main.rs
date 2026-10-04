@@ -1,4 +1,5 @@
 mod chrome;
+mod claude_process;
 mod commands;
 mod config;
 mod desktop;
