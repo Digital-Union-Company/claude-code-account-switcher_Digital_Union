@@ -63,3 +63,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/windows_launcher.ps1 -Binary ./target/release/claude-acc.exe
+
+      - name: Windows native shim acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows_shim.ps1 -Binary ./target/release/claude-acc.exe

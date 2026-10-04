@@ -48,7 +48,7 @@ pub fn run(config: &AppConfig, i18n: &I18n) {
             let installed_version = installed_version.trim().replace("claude-acc ", "");
             if installed_version == current_version {
                 i18n.print(Msg::InstallUpToDate(current_version.to_string()));
-                ensure_ide_integration(config, &target);
+                ensure_ide_integration(config, &target, i18n);
                 ensure_shell_integration(config, i18n);
                 return;
             }
@@ -80,14 +80,17 @@ pub fn run(config: &AppConfig, i18n: &I18n) {
 
     i18n.print(Msg::InstallDone(target.to_str().unwrap_or("").to_string()));
 
-    ensure_ide_integration(config, &target);
+    ensure_ide_integration(config, &target, i18n);
     ensure_shell_integration(config, i18n);
 }
 
-fn ensure_ide_integration(config: &AppConfig, claude_acc_bin: &Path) {
-    // Best-effort: errors here shouldn't block install. The shell integration
-    // and binary copy already happened.
-    let _ = ide::install_wrapper(config, claude_acc_bin);
+fn ensure_ide_integration(config: &AppConfig, claude_acc_bin: &Path, i18n: &I18n) {
+    // The manager binary is already usable when this runs, but a failed shim
+    // must be visible: silently leaving an older claude.exe on PATH would run
+    // different routing code than the installed manager.
+    if let Err(error) = ide::install_wrapper(config, claude_acc_bin) {
+        i18n.print(Msg::InstallWrapperFailed(error.to_string()));
+    }
     let _ = ide::refresh_all_account_symlinks(config);
     refresh_vscode_wrapper(config, claude_acc_bin);
 }
@@ -121,49 +124,28 @@ fn ensure_shell_integration(config: &AppConfig, i18n: &I18n) {
         // so without the `-join "`n"` it silently runs only the first
         // line of `init pwsh` (a comment) and the integration is dead.
         "pwsh" | "powershell" => format!(
-            "Invoke-Expression ((& '{}' init pwsh) -join \"`n\")",
-            bin_str
+            "Invoke-Expression ((& {} init pwsh) -join \"`n\")",
+            crate::powershell::single_quoted_literal(bin_str)
         ),
         _ => format!("eval \"$('{0}' init {1})\"", bin_str, shell),
     };
 
     if let Some(rc) = rc_path {
-        // PowerShell profile paths can point at $HOME/Documents/PowerShell/...
-        // which may not exist on a fresh install. Create parent dirs lazily.
-        if let Some(parent) = rc.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            let _ = fs::create_dir_all(parent);
-        }
-        let content = fs::read_to_string(&rc).unwrap_or_default();
-
-        // Match any line that mentions claude-acc + init (handles quoting
-        // around the binary path, like 'claude-acc' init zsh).
-        let init_line_count = content
-            .lines()
-            .filter(|l| is_claude_acc_init_line(l))
-            .count();
-        let has_exact_match = content.lines().any(|l| l.trim() == eval_line.trim());
-
-        if init_line_count == 0 {
-            let mut content = content;
-            if !content.ends_with('\n') && !content.is_empty() {
-                content.push('\n');
+        match update_shell_profile(&rc, &eval_line) {
+            Ok(ShellProfileChange::Added) => {
+                i18n.print(Msg::InstallShellAdded(rc.to_string_lossy().to_string()))
             }
-            content.push_str(&format!(
-                "\n# Claude Code Account Switcher\n{}\n",
-                eval_line
-            ));
-            fs::write(&rc, content).expect("Failed to update rc file");
-            i18n.print(Msg::InstallShellAdded(rc.to_string_lossy().to_string()));
-        } else if init_line_count == 1 && has_exact_match {
-            i18n.print(Msg::InstallShellAlready(rc.to_string_lossy().to_string()));
-        } else {
-            // Either: stale path (mismatch) or duplicates from a previous
-            // buggy install. Either way, dedupe and refresh.
-            let updated = update_eval_line(&content, &eval_line);
-            fs::write(&rc, updated).expect("Failed to update rc file");
-            i18n.print(Msg::InstallShellUpdated(rc.to_string_lossy().to_string()));
+            Ok(ShellProfileChange::AlreadyCurrent) => {
+                i18n.print(Msg::InstallShellAlready(rc.to_string_lossy().to_string()))
+            }
+            Ok(ShellProfileChange::Updated) => {
+                i18n.print(Msg::InstallShellUpdated(rc.to_string_lossy().to_string()))
+            }
+            Err(error) => i18n.print(Msg::InstallShellFailed(
+                rc.to_string_lossy().to_string(),
+                error.to_string(),
+                eval_line.clone(),
+            )),
         }
     } else {
         i18n.print(Msg::InstallShellManual(eval_line));
@@ -173,6 +155,58 @@ fn ensure_shell_integration(config: &AppConfig, i18n: &I18n) {
     // wrapper above doesn't reach it. Say so — but don't write into
     // someone's editor config unasked; that's `vscode install`.
     super::vscode::print_install_hint(config, i18n);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellProfileChange {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+/// Update one shell profile without ever conflating "not found" with "could
+/// not read". In particular, InvalidData from a UTF-16/non-UTF-8 PowerShell
+/// profile is returned before any write occurs.
+fn update_shell_profile(rc: &Path, eval_line: &str) -> std::io::Result<ShellProfileChange> {
+    let content = match fs::read_to_string(rc) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+
+    let init_line_count = content
+        .lines()
+        .filter(|line| is_claude_acc_init_line(line))
+        .count();
+    let has_exact_match = content.lines().any(|line| line.trim() == eval_line.trim());
+    if init_line_count == 1 && has_exact_match {
+        return Ok(ShellProfileChange::AlreadyCurrent);
+    }
+
+    let (updated, change) = if init_line_count == 0 {
+        let mut updated = content;
+        if !updated.ends_with('\n') && !updated.is_empty() {
+            updated.push('\n');
+        }
+        updated.push_str(&format!(
+            "\n# Claude Code Account Switcher\n{}\n",
+            eval_line
+        ));
+        (updated, ShellProfileChange::Added)
+    } else {
+        (
+            update_eval_line(&content, eval_line),
+            ShellProfileChange::Updated,
+        )
+    };
+
+    if let Some(parent) = rc.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(rc, updated)?;
+    Ok(change)
 }
 
 fn detect_shell_and_rc() -> (String, Option<PathBuf>) {
@@ -316,6 +350,71 @@ mod tests {
         assert!(is_claude_acc_init_line(
             "Invoke-Expression (& 'C:\\Users\\me\\.claude-switch\\bin\\claude-acc' init pwsh)"
         ));
+    }
+
+    #[test]
+    fn powershell_install_line_quotes_apostrophe_in_binary_path() {
+        let literal = crate::powershell::single_quoted_literal(
+            r"C:\Users\O'Brien\.claude-switch\bin\claude-acc.exe",
+        );
+        let line = format!("Invoke-Expression ((& {} init pwsh) -join \"`n\")", literal);
+        assert_eq!(
+            line,
+            r#"Invoke-Expression ((& 'C:\Users\O''Brien\.claude-switch\bin\claude-acc.exe' init pwsh) -join "`n")"#
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_profile_is_never_replaced() {
+        let root =
+            std::env::temp_dir().join(format!("cc-install-invalid-profile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let profile = root.join("Microsoft.PowerShell_profile.ps1");
+        let original = vec![0xff, 0xfe, 0x00, 0x61, 0x00];
+        fs::write(&profile, &original).unwrap();
+
+        let result = update_shell_profile(&profile, "replacement");
+        assert!(result.is_err());
+        assert_eq!(fs::read(&profile).unwrap(), original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn other_profile_read_errors_never_turn_into_a_replacement_file() {
+        let root = std::env::temp_dir().join(format!(
+            "cc-install-unreadable-profile-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        assert!(update_shell_profile(&root, "replacement").is_err());
+        assert!(root.is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_and_existing_utf8_profiles_follow_explicit_paths() {
+        let root =
+            std::env::temp_dir().join(format!("cc-install-profile-update-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let profile = root.join("nested/profile.ps1");
+        let line = "Invoke-Expression ((& 'C:\\bin\\claude-acc.exe' init pwsh) -join \"`n\")";
+
+        assert_eq!(
+            update_shell_profile(&profile, line).unwrap(),
+            ShellProfileChange::Added
+        );
+        assert_eq!(
+            update_shell_profile(&profile, line).unwrap(),
+            ShellProfileChange::AlreadyCurrent
+        );
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap().matches(line).count(),
+            1
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

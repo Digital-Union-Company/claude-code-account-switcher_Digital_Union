@@ -2,12 +2,13 @@
 
 [← README](../README.md) · [Русский](ru/ide.md)
 
-JetBrains IDEs (PhpStorm, IntelliJ etc.) and VS Code launch the `claude` binary directly without sourcing your shell config, so `CLAUDE_CONFIG_DIR` would not be set and the wrong account would be used. To make IDE ↔ Claude Code handshake work for non-default accounts, `claude-acc install` sets up two things:
+JetBrains IDEs (PhpStorm, IntelliJ etc.) and terminals launch the `claude` binary from `PATH`. To make those launches account-aware, `claude-acc install` sets up the platform's PATH wrapper:
 
-- A wrapper at `~/.claude-switch/bin/claude` that picks the account for the current working directory (via `claude-acc activate`) and `exec`s the real `claude` binary. `~/.claude-switch/bin` is prepended to `PATH` (by the shell init), so both terminals and IDEs pick up the wrapper transparently.
-- A symlink `~/.claude-switch/accounts/<name>/ide → ~/.claude/ide` for every account. Claude Code writes IDE lock files to `$CLAUDE_CONFIG_DIR/ide/`, but IDE plugins always look in `~/.claude/ide/`. The symlink makes both sides agree.
+- macOS/Linux use `~/.claude-switch/bin/claude`, a shell wrapper.
+- Windows uses a native `~/.claude-switch/bin/claude.exe`, a second entry point of the manager binary. It re-evaluates the current directory on every invocation and launches the real Claude through the secure structured launcher, excluding the manager bin directory to prevent recursion.
+- On macOS/Linux, a symlink `~/.claude-switch/accounts/<name>/ide → ~/.claude/ide` also makes Claude Code and IDE plugins agree on the lock-file directory. Windows lock-directory sharing is still deferred.
 
-No manual setup required — `claude-acc install` does both. New accounts created via `claude-acc add` get their `ide/` symlink automatically.
+`~/.claude-switch/bin` is prepended to `PATH` by shell init. Named Windows accounts receive account-local Claude and Anthropic profile directories, even if the shell exported stale values. Default/unlinked directories retain upstream default-profile behavior.
 
 ### The VS Code extension's native UI needs one more step (`vscode`)
 
@@ -45,5 +46,7 @@ It covers VS Code, VS Code Insiders, VSCodium and Cursor — whichever are insta
 - **Only the default VS Code profile is set up.** `claudeCode.claudeProcessWrapper` is machine-scoped, and VS Code keeps only `application`-scoped settings outside a profile — its own UI strings say so: an application setting "is not specific to the current profile, and will retain its value when switching profiles", and `settings.applyToAllProfiles` exists precisely so other settings can opt in. A profile carrying its own settings therefore reads those *instead of* the file this writes, with no fallback, and a window on it goes on ignoring the account. `vscode install` and `vscode status` name such profiles and stop reporting a flat "on", since that would be a false positive — worse than doing nothing, because you would look for the fault elsewhere. Two ways out: work in the default profile, or add `claudeCode.claudeProcessWrapper` to `settings.applyToAllProfiles`. (A profile created without ticking Settings shares the default profile's file, so it is already covered.) Writing every profile is a follow-up.
 - **Two behaviours of the extension change** when any process wrapper is set, ours or anyone's: it resolves the permission mode itself instead of deferring to the CLI, and it stops checking for its own updates. `vscode uninstall` puts both back.
 - **`settings.json` is edited as text, not reserialised.** It is JSONC — comments and trailing commas are legal, and round-tripping it through a JSON parser would delete every comment in it. Only the one key's value is touched; a file that isn't a JSON object is reported and left alone, and a wrapper pointing at another tool is never replaced without `--force`.
-- **Not on Windows yet.** The wrapper is a shell script; a `.cmd`/`.exe` shim the extension can spawn hasn't been built. Terminal mode works there today.
+- **Windows native UI wiring remains deferred.** The Windows PATH shim is a native `.exe`, but the extension passes its bundled Claude executable as an extra first argument under a different wrapper contract. R3A intentionally does not point `claudeCode.claudeProcessWrapper` at the PATH shim or enable `vscode install` on Windows. Terminal mode and other PATH-honoring launchers are covered.
 - **Remote-SSH, WSL and code-server are not covered.** The wrapper would have to live on the remote machine, which is a different problem.
+- **Windows IDE lock-directory sharing remains deferred.** No symlink or junction is created for `<account>/ide` and `~/.claude/ide`.
+- **Windows mapping normalization remains deferred.** Existing raw links keep their exact drive/slash/case, junction, UNC and verbatim-path semantics.

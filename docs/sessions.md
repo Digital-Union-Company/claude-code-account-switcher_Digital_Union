@@ -129,6 +129,6 @@ The wrapper is careful about staying out of the way:
 - it does nothing without a terminal on both stdin and stdout, so scripts, pipes and CI are never prompted at;
 - whatever happens, claude still starts — a failure in the check is never a failure to launch.
 
-**macOS and Linux only.** The hook lives in the wrapper script, and there is no wrapper on Windows — PATH-based interception there would need a `.cmd`/`.exe` shim. `claude-acc run <account> --resume <id>` does the same check on every platform.
+On Windows, `claude-acc install` installs a native `~/.claude-switch/bin/claude.exe` shim, so the same check applies to plain `claude --resume <id>`. The shim resolves the target account from cwd first and ignores stale inherited `CLAUDE_CONFIG_DIR`. It only runs the preflight when both stdin and stdout are terminals; scripts, pipes and CI pass straight through. A bare `claude --resume` remains Claude's own picker.
 
 `claude-acc update` refreshes the wrapper for you; `claude-acc install` does too, if you ever need to force it.

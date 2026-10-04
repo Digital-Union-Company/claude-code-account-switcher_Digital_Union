@@ -11,12 +11,14 @@ mod environment;
 mod i18n;
 mod ide;
 mod identity;
+mod powershell;
 mod resolve;
 mod seed;
 mod sessions;
 mod trash;
 mod vscode;
 mod windows_invocation;
+mod windows_shim;
 
 use clap::{Parser, Subcommand};
 use commands::activate::ShellSyntax;
@@ -349,6 +351,16 @@ fn should_show_update_hint(command: &Option<Commands>) -> bool {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::current_exe()
+        .ok()
+        .as_deref()
+        .map(windows_shim::invocation_mode)
+        == Some(windows_shim::InvocationMode::Shim)
+    {
+        std::process::exit(windows_shim::run());
+    }
+
     let cli = Cli::parse();
     let config = AppConfig::new();
     config
