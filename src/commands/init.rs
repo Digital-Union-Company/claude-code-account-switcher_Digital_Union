@@ -15,5 +15,32 @@ pub fn run(shell: &str) {
         }
     };
 
-    print!("{}", template.replace("__CLAUDE_ACC_BIN__", &bin));
+    let rendered = match shell {
+        // The template already places every placeholder inside single quotes.
+        // Replace the whole literal so apostrophes in the path are doubled
+        // exactly once.
+        "pwsh" | "powershell" => template.replace(
+            "'__CLAUDE_ACC_BIN__'",
+            &crate::powershell::single_quoted_literal(&bin),
+        ),
+        _ => template.replace("__CLAUDE_ACC_BIN__", &bin),
+    };
+    print!("{}", rendered);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn powershell_template_replacement_is_safe_for_apostrophe_paths() {
+        let template = "& '__CLAUDE_ACC_BIN__' activate --shell powershell";
+        let path = r"C:\Users\O'Brien\claude-acc.exe";
+        let rendered = template.replace(
+            "'__CLAUDE_ACC_BIN__'",
+            &crate::powershell::single_quoted_literal(path),
+        );
+        assert_eq!(
+            rendered,
+            r"& 'C:\Users\O''Brien\claude-acc.exe' activate --shell powershell"
+        );
+    }
 }

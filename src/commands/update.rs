@@ -130,19 +130,24 @@ pub fn run(config: &AppConfig, i18n: &I18n, check_only: bool, version: Option<&s
 /// nothing to hint at why.
 ///
 /// Only refreshes a wrapper that is already there: an update is not the
-/// moment to start installing shell integration behind someone's back, and
-/// on Windows there is no wrapper to install at all.
+/// moment to start installing shell integration behind someone's back.
 fn refresh_wrapper(config: &AppConfig, binary: &Path, i18n: &I18n) {
-    if !wrapper_path(config).exists() {
-        return;
-    }
-    match crate::ide::install_wrapper(config, binary) {
-        Ok(_) => i18n.print(Msg::UpdateWrapperRefreshed),
+    match refresh_existing_wrapper(config, binary) {
+        Ok(false) => return,
+        Ok(true) => i18n.print(Msg::UpdateWrapperRefreshed),
         // Non-fatal: the new binary is already in place and works. Say so
         // rather than failing an otherwise successful update.
         Err(e) => i18n.print(Msg::UpdateWrapperFailed(e.to_string())),
     }
     refresh_vscode_wrapper(config, binary, i18n);
+}
+
+fn refresh_existing_wrapper(config: &AppConfig, binary: &Path) -> std::io::Result<bool> {
+    if !wrapper_path(config).exists() {
+        return Ok(false);
+    }
+    crate::ide::install_wrapper(config, binary)?;
+    Ok(true)
 }
 
 /// Same reasoning for the VS Code launcher, and same rule: refresh one that
@@ -162,7 +167,7 @@ fn refresh_vscode_wrapper(_config: &AppConfig, _binary: &Path, _i18n: &I18n) {}
 
 /// Where `install` puts the generated `claude` wrapper.
 fn wrapper_path(config: &AppConfig) -> PathBuf {
-    config.base_dir.join("bin").join("claude")
+    crate::ide::wrapper_path(config)
 }
 
 /// Replace `target` with the freshly-downloaded `tmp` (same directory, so the
@@ -514,14 +519,18 @@ mod tests {
     #[test]
     fn wrapper_path_matches_where_install_writes_it() {
         let config = temp_config("wrapper-path");
-        assert_eq!(wrapper_path(&config), config.base_dir.join("bin/claude"));
+        let expected = if cfg!(windows) {
+            config.base_dir.join("bin/claude.exe")
+        } else {
+            config.base_dir.join("bin/claude")
+        };
+        assert_eq!(wrapper_path(&config), expected);
         let _ = std::fs::remove_dir_all(&config.base_dir);
     }
 
     #[test]
     fn refresh_does_not_create_a_wrapper_that_was_never_installed() {
-        // An update must not start adding shell integration on its own —
-        // and on Windows there is no wrapper to write in the first place.
+        // An update must not start adding shell integration on its own.
         let config = temp_config("no-wrapper");
         let i18n = I18n {
             lang: crate::i18n::Lang::En,
@@ -556,6 +565,46 @@ mod tests {
             "wrapper does not point at the new binary: {}",
             content
         );
+        let _ = std::fs::remove_dir_all(&config.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refresh_rewrites_an_existing_native_shim_from_the_new_binary() {
+        let config = temp_config("stale-native-wrapper");
+        let wrapper = wrapper_path(&config);
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, b"stale shim").unwrap();
+        let binary = config.base_dir.join("claude-acc.exe");
+        std::fs::write(&binary, b"new manager binary").unwrap();
+
+        assert!(refresh_existing_wrapper(&config, &binary).unwrap());
+        assert_eq!(std::fs::read(&wrapper).unwrap(), b"new manager binary");
+        let _ = std::fs::remove_dir_all(&config.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_native_shim_refresh_fails_without_changing_manager_binary() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let config = temp_config("locked-native-wrapper");
+        let wrapper = wrapper_path(&config);
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, b"old shim").unwrap();
+        let binary = config.base_dir.join("claude-acc.exe");
+        std::fs::write(&binary, b"updated manager").unwrap();
+        let _lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&wrapper)
+            .unwrap();
+
+        assert!(refresh_existing_wrapper(&config, &binary).is_err());
+        assert_eq!(std::fs::read(&binary).unwrap(), b"updated manager");
+        assert_eq!(std::fs::read(&wrapper).unwrap(), b"old shim");
+        drop(_lock);
         let _ = std::fs::remove_dir_all(&config.base_dir);
     }
 

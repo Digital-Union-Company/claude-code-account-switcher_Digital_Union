@@ -49,9 +49,15 @@ PowerShell on a fresh Windows install needs two extra steps before `claude-acc` 
    ```powershell
    & "$HOME\Downloads\claude-acc.exe" install
    ```
-3. **Restart PowerShell.** The profile only runs at shell startup, so the new `PATH` (and `cd`-activation) take effect in newly-spawned shells. After that, plain `claude-acc add work` works from anywhere.
+3. **Restart PowerShell.** The profile only runs at shell startup, so the new `PATH` takes effect in newly-spawned shells. After that, plain `claude-acc add work` works from anywhere, and plain `claude` is routed through the native account-aware shim.
 
 Affected by an older broken install (binary copied without `.exe`, or shell line written for bash)? Re-run `claude-acc install` — it auto-cleans the stale extension-less binary and rewrites the profile line for PowerShell.
+
+`install` writes two native executables under `~/.claude-switch/bin`: the manager as `claude-acc.exe` and an account-routing copy as `claude.exe`. Every plain `claude` invocation re-evaluates the current directory's existing link/default mapping, then uses the same secure launcher as `claude-acc run`. A named account gets its account-local `CLAUDE_CONFIG_DIR` and `ANTHROPIC_CONFIG_DIR`; stale values inherited from the shell cannot override it. An unlinked directory with no configured manager default, an explicit `default`, or a stale link to a missing account uses ordinary default-profile behavior.
+
+Shim replacement is staged before the live file is switched. Re-running `install` is idempotent when the bytes already match. If `claude.exe` is locked by an active Claude session, installation reports the failure instead of leaving a partial executable; close those sessions and rerun `install`. `claude-acc update` refreshes an existing shim but never creates one that was absent.
+
+PowerShell integration uses escaped single-quoted literals, including paths containing an apostrophe. An existing profile must be readable UTF-8: permission errors and UTF-16/other invalid encodings are reported and the original bytes are left untouched. In that case, add the printed integration manually rather than expecting an automatic encoding conversion.
 
 **Logging in on Windows.** `claude-acc add <name>` and `claude-acc login <name>` both spawn `claude auth login` under the new `CLAUDE_CONFIG_DIR`. On Windows that subcommand falls back to plain-text mode (no TUI), and the OAuth localhost callback frequently races ahead — so the `Paste code here if prompted >` prompt is unreliable for entering the code by hand. Workaround: after `claude-acc add <name>` has created the account directory, drive the login through Claude Code's first-launch TUI instead:
 
@@ -108,3 +114,10 @@ So you can move from one to the other without re-creating accounts or relinking 
 3. Optionally `rm ~/.claude-switch/bin/claude-acc ~/.claude-switch/bin/claude` (the wrapper). The shell version regenerates its own wrapper on `source`.
 
 Account credentials, links, and the `default` setting carry over without any changes.
+
+### Current Windows limits
+
+- Directory links still use exact raw path strings; drive/slash/case, junction, UNC and verbatim-path normalization is deferred.
+- The VS Code native UI has a separate process-wrapper calling convention and is not wired to the PATH shim. Terminals and launchers that honor `PATH` are covered.
+- Per-account Windows `ide/` lock-directory sharing is not installed.
+- Cross-account resume reuses the current session-copy implementation; Windows overwrite/rollback transaction hardening is deferred.

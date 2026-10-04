@@ -2,12 +2,13 @@
 
 [← README](../../README.ru.md) · [English](../ide.md)
 
-JetBrains IDE (PhpStorm, IntelliJ и т.п.) и VS Code запускают `claude` напрямую, не source-я ваш shell-конфиг. Без этого `CLAUDE_CONFIG_DIR` не выставится и подхватится не тот аккаунт. Чтобы это работало для не-default аккаунтов, `claude-acc install` ставит две вещи:
+JetBrains IDE (PhpStorm, IntelliJ и т.п.) и терминалы запускают `claude` из `PATH`. Чтобы эти запуски учитывали аккаунт, `claude-acc install` ставит платформенный PATH-wrapper:
 
-- Wrapper `~/.claude-switch/bin/claude`, который определяет аккаунт для текущей директории (через `claude-acc activate`) и `exec`-ает реальный `claude`. `~/.claude-switch/bin` добавляется в начало `PATH` (через shell-init), так что и терминал, и IDE прозрачно подхватывают wrapper.
-- Symlink `~/.claude-switch/accounts/<name>/ide → ~/.claude/ide` для каждого аккаунта. Claude Code пишет lock-файлы IDE в `$CLAUDE_CONFIG_DIR/ide/`, а IDE-плагины ищут их в `~/.claude/ide/`. Symlink приводит обе стороны к одному месту.
+- macOS/Linux используют shell-wrapper `~/.claude-switch/bin/claude`.
+- Windows использует нативный `~/.claude-switch/bin/claude.exe` — вторую точку входа того же manager-бинарника. При каждом запуске она заново определяет текущую директорию и запускает реальный Claude через защищённый structured launcher, исключая manager bin для предотвращения рекурсии.
+- На macOS/Linux symlink `~/.claude-switch/accounts/<name>/ide → ~/.claude/ide` также сводит Claude Code и IDE-плагины к одной lock-директории. На Windows sharing lock-директории пока отложен.
 
-Никаких ручных шагов не нужно — `claude-acc install` делает обе вещи. Новые аккаунты, создаваемые через `claude-acc add`, получают `ide/` symlink автоматически.
+Shell-init добавляет `~/.claude-switch/bin` в начало `PATH`. На Windows именованные аккаунты получают локальные Claude- и Anthropic-профили, даже если shell экспортировал устаревшие значения. Для default/непривязанных директорий сохраняется обычное upstream-поведение default-профиля.
 
 ### Нативному UI расширения VS Code нужен ещё один шаг (`vscode`)
 
@@ -45,5 +46,7 @@ Cursor: claudeCode.claudeProcessWrapper -> /Users/you/.claude-switch/bin/claude-
 - **Настраивается только профиль VS Code по умолчанию.** `claudeCode.claudeProcessWrapper` — машинного скоупа, а вне профиля в VS Code живут только настройки скоупа `application`; это говорят его собственные строки интерфейса: application-настройка «не относится к текущему профилю и сохраняет значение при переключении профилей», а `settings.applyToAllProfiles` существует ровно затем, чтобы остальные могли к этому присоединиться. Поэтому профиль со своими настройками читает их *вместо* того файла, который пишет эта команда, без всякого фолбэка, и окно на нём продолжает игнорировать аккаунт. `vscode install` и `vscode status` называют такие профили и перестают показывать простое «вкл»: это было бы ложноположительным статусом — хуже, чем ничего не сделать, потому что причину вы стали бы искать не там. Два выхода: работать в профиле по умолчанию либо добавить `claudeCode.claudeProcessWrapper` в `settings.applyToAllProfiles`. (Профиль, созданный без галочки Settings, пользуется файлом дефолтного профиля — там всё уже работает.) Запись во все профили — следующим шагом.
 - **Два поведения расширения меняются**, когда задан любой process wrapper — наш или чужой: оно само определяет permission mode вместо того, чтобы отдать это CLI, и перестаёт проверять свои обновления. `vscode uninstall` возвращает оба назад.
 - **`settings.json` правится как текст, а не пересериализуется.** Это JSONC — комментарии и висящие запятые в нём легальны, и round-trip через JSON-парсер удалил бы все комментарии. Трогается значение ровно одного ключа; файл, который не является JSON-объектом, не переписывается, а wrapper, указывающий на чужой инструмент, никогда не заменяется без `--force`.
-- **Пока не на Windows.** Wrapper — это shell-скрипт; `.cmd`/`.exe` шима, который расширение сможет запустить, ещё нет. Режим терминала там работает уже сейчас.
+- **Подключение нативного UI Windows пока отложено.** Windows PATH-шима — нативный `.exe`, но расширение передаёт ей собственный bundled Claude как дополнительный первый аргумент по другому wrapper-контракту. R3A намеренно не направляет `claudeCode.claudeProcessWrapper` на PATH-шиму и не включает `vscode install` на Windows. Терминальный режим и другие launchers, соблюдающие `PATH`, покрыты.
 - **Remote-SSH, WSL и code-server не покрыты.** Wrapper должен был бы лежать на удалённой машине — это отдельная задача.
+- **Sharing Windows lock-директории IDE отложен.** Symlink/junction для `<account>/ide` и `~/.claude/ide` не создаётся.
+- **Нормализация Windows-привязок отложена.** Существующие raw-links сохраняют точную семантику диска/слешей/регистра, junction, UNC и verbatim-путей.

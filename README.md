@@ -30,7 +30,7 @@ claude-acc install
 
 This will:
 - Copy the binary to `~/.claude-switch/bin/claude-acc` (`.exe` on Windows)
-- Install the IDE wrapper at `~/.claude-switch/bin/claude` (see [IDE integration](docs/ide.md))
+- Install the account-routing wrapper at `~/.claude-switch/bin/claude` (Windows: native `claude.exe`; see [IDE integration](docs/ide.md))
 - Auto-detect your shell (zsh/bash/PowerShell)
 - Add shell integration to your rc file
 
@@ -57,7 +57,7 @@ claude-acc link work
 
 - **The account follows the directory.** `cd` into a linked tree and plain `claude` is on that account — in every terminal, at the same time, with no global state to switch back. See [Directory inheritance](#directory-inheritance).
 - **Each account is a whole config dir** — its own `settings.json`, `CLAUDE.md`, agents, skills, plugins, MCP servers and history, not just a login. See [Accounts and configuration](docs/accounts.md).
-- **IDEs follow too.** JetBrains and the VS Code terminal go through a wrapper on `PATH`; the VS Code extension's native UI takes one more command. See [IDE integration](docs/ide.md).
+- **PATH-based launchers follow too.** JetBrains and the VS Code terminal go through the account-routing wrapper. The VS Code native UI uses a separate wrapper contract; its Windows wiring remains deferred. See [IDE integration](docs/ide.md).
 - **You can see who each config dir is signed in as** — live, from the OAuth profile API — and pin it, so a re-login with the wrong browser session is reported instead of silently rebinding. See [Identities](docs/identity.md).
 - **Rate limits per account**, 5h and 7d, so you can pick a fresh one before you hit a wall. See [`usage`](docs/identity.md#how-much-rate-limit-is-left-usage).
 - **Conversations can move between accounts.** Hit a limit mid-task and carry on elsewhere — `--resume` offers it for you. See [Sessions across accounts](docs/sessions.md).
@@ -206,7 +206,7 @@ claude-acc update          # download + install the latest release
 claude-acc update --check  # just report whether a newer version exists
 ```
 
-For the **Rust CLI**, `update` queries the latest GitHub release, and if it's newer than the running binary, downloads the prebuilt asset for your OS/architecture and swaps it in over `~/.claude-switch/bin/claude-acc`. Needs `curl`; prebuilt assets exist for macOS (x86_64/arm64), Linux (x86_64/arm64), and Windows (x86_64). On other platforms, build from source with `cargo install --path .`.
+For the **Rust CLI**, `update` queries the latest GitHub release, and if it's newer than the running binary, downloads the prebuilt asset for your OS/architecture and swaps it in over `~/.claude-switch/bin/claude-acc`. An already-installed Claude wrapper is refreshed too; update never installs an absent wrapper. Needs `curl`; prebuilt assets exist for macOS (x86_64/arm64), Linux (x86_64/arm64), and Windows (x86_64). On other platforms, build from source with `cargo install --path .`.
 
 For the **shell script**, `claude-acc update` re-fetches the latest `claude-switch.sh` from GitHub into the file you sourced it from; re-source it (or open a new shell) to pick up the changes.
 

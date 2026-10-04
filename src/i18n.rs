@@ -255,6 +255,14 @@ impl I18n {
             (Msg::InstallCopying(ref v), Lang::Ru) => format!("Установка v{}...", v),
             (Msg::InstallDone(ref p), Lang::En) => format!("Binary installed: {}", p),
             (Msg::InstallDone(ref p), Lang::Ru) => format!("Бинарник установлен: {}", p),
+            (Msg::InstallWrapperFailed(ref e), Lang::En) => format!(
+                "Could not install the claude wrapper: {}\nClose active Claude sessions and rerun 'claude-acc install'.",
+                e
+            ),
+            (Msg::InstallWrapperFailed(ref e), Lang::Ru) => format!(
+                "Не удалось установить враппер claude: {}\nЗакройте активные сессии Claude и снова выполните 'claude-acc install'.",
+                e
+            ),
             (Msg::InstallShellAlready(ref f), Lang::En) => {
                 format!("Shell integration already in {}", f)
             }
@@ -277,6 +285,14 @@ impl I18n {
             (Msg::InstallShellManual(ref line), Lang::Ru) => {
                 format!("Добавьте в конфиг шелла:\n  {}", line)
             }
+            (Msg::InstallShellFailed(ref path, ref e, ref line), Lang::En) => format!(
+                "Could not read or update shell profile {}: {}\nThe existing file was left unchanged; add shell integration manually:\n  {}",
+                path, e, line
+            ),
+            (Msg::InstallShellFailed(ref path, ref e, ref line), Lang::Ru) => format!(
+                "Не удалось прочитать или обновить профиль оболочки {}: {}\nСуществующий файл не изменён; добавьте интеграцию вручную:\n  {}",
+                path, e, line
+            ),
 
             // seed / clone-settings
             (Msg::SeedCopied(ref s), Lang::En) => format!("  copied: {}", s),
@@ -423,11 +439,11 @@ impl I18n {
             (Msg::UpdateWrapperRefreshed, Lang::En) => s("Refreshed the claude wrapper."),
             (Msg::UpdateWrapperRefreshed, Lang::Ru) => s("Враппер claude обновлён."),
             (Msg::UpdateWrapperFailed(ref e), Lang::En) => format!(
-                "The binary was updated, but the claude wrapper could not be refreshed: {}\nRun 'claude-acc install' to fix it.",
+                "The binary was updated, but the claude wrapper could not be refreshed: {}\nClose active Claude sessions, then rerun 'claude-acc install' or 'claude-acc update'.",
                 e
             ),
             (Msg::UpdateWrapperFailed(ref e), Lang::Ru) => format!(
-                "Бинарник обновлён, но враппер claude обновить не удалось: {}\nВыполните 'claude-acc install', чтобы починить.",
+                "Бинарник обновлён, но враппер claude обновить не удалось: {}\nЗакройте активные сессии Claude, затем снова выполните 'claude-acc install' или 'claude-acc update'.",
                 e
             ),
 
@@ -1117,14 +1133,16 @@ impl I18n {
                 names
             ),
             (Msg::VscodeWindowsUnsupported, Lang::En) => s(
-                "Not on Windows yet: the wrapper is a shell script, and a .cmd \
-                 or .exe shim the extension can spawn hasn't been built. \
-                 Terminal mode (claudeCode.useTerminal) works there today.",
+                "Not on Windows yet: the native UI passes its bundled Claude \
+                 executable to a process wrapper using a separate calling \
+                 convention. The PATH-based claude.exe shim and terminal mode \
+                 work there, but native UI wiring remains deferred.",
             ),
             (Msg::VscodeWindowsUnsupported, Lang::Ru) => s(
-                "Пока не на Windows: wrapper — это shell-скрипт, а .cmd/.exe \
-                 шима, который расширение сможет запустить, ещё нет. Режим \
-                 терминала (claudeCode.useTerminal) там работает уже сейчас.",
+                "Пока не на Windows: нативный UI передаёт свой встроенный \
+                 бинарник Claude process-wrapper'у по отдельному протоколу. \
+                 PATH-шима claude.exe и терминальный режим уже работают, но \
+                 подключение нативного UI пока отложено.",
             ),
             (Msg::VscodeNoEditors, Lang::En) => {
                 s("No VS Code, VS Code Insiders, VSCodium or Cursor found on this machine.")
@@ -1319,10 +1337,12 @@ pub enum Msg {
     InstallUpdating(String, String),
     InstallCopying(String),
     InstallDone(String),
+    InstallWrapperFailed(String),
     InstallShellAlready(String),
     InstallShellUpdated(String),
     InstallShellAdded(String),
     InstallShellManual(String),
+    InstallShellFailed(String, String, String),
     DoctorHeader(usize),
     DoctorNoToken(String),
     DoctorOffline,
