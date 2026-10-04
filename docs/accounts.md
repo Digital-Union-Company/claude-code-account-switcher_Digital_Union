@@ -163,6 +163,14 @@ claude-acc link work-ml
 
 > Note: `claude-acc add` runs `claude login`, so you'll need to log in again (same account, just a new config directory).
 
+### Windows directory identity
+
+The `links` file keeps its existing human-readable `path=account` format. The final `=` is the separator, so Windows and Unix directory names containing `=` round-trip without a migration. The spelling written by `link` remains the spelling shown by `links`; lookup never replaces a junction name with its physical target or lowercases the stored path.
+
+On Windows, routing compares ordinary equivalent spellings: drive and path case, `/` versus `\`, redundant `.`/`..`, trailing separators, and ordinary versus `\\?\` drive/UNC forms. If both paths currently exist, a second physical comparison also recognizes junction aliases. Deleted paths, disconnected drives, and offline UNC paths remain in the file and still receive lexical matching where possible; lookup does not require network access. macOS and Linux retain exact-path matching and their existing symlink semantics.
+
+Equivalent aliases for one directory and one account are accepted. If equivalent aliases point to different accounts, routing fails closed instead of starting Claude or reporting a default identity. Run `claude-acc link <account>` in that directory to replace all equivalent aliases with the selected mapping, or `claude-acc unlink` to remove them all.
+
 ## Importing an existing config dir
 
 Already running multiple accounts the manual way — separate `~/.claude-work` / `~/.claude-personal` directories driven by `CLAUDE_CONFIG_DIR` aliases? `import` adopts one of those into a managed account **without making you log in again**:

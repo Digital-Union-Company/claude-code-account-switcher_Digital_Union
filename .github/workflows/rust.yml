@@ -68,3 +68,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/windows_shim.ps1 -Binary ./target/release/claude-acc.exe
+
+      - name: Windows path identity acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows_paths.ps1 -Binary ./target/release/claude-acc.exe

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -22,6 +23,58 @@ pub fn is_reserved_name(name: &str) -> bool {
 
 pub struct AppConfig {
     pub base_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLink {
+    /// Original spelling retained in the links file for display.
+    pub directory: String,
+    pub account: String,
+}
+
+#[derive(Debug)]
+pub enum LinkResolveError {
+    Io(io::Error),
+    Ambiguous {
+        directory: String,
+        mappings: Vec<(String, String)>,
+    },
+}
+
+impl fmt::Display for LinkResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Ambiguous { directory, .. } => {
+                write!(f, "ambiguous account links for {directory}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LinkResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Ambiguous { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for LinkResolveError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn parse_link_line(line: &str) -> Option<(String, String)> {
+    let (directory, account) = line.rsplit_once('=')?;
+    let directory = directory.trim();
+    let account = account.trim();
+    if directory.is_empty() || account.is_empty() {
+        return None;
+    }
+    Some((directory.to_string(), account.to_string()))
 }
 
 impl AppConfig {
@@ -152,32 +205,33 @@ impl AppConfig {
 
     pub fn all_links(&self) -> io::Result<Vec<(String, String)>> {
         let content = fs::read_to_string(self.links_path())?;
-        let mut links = Vec::new();
-        for line in content.lines() {
-            if let Some((dir, account)) = line.split_once('=') {
-                let dir = dir.trim();
-                let account = account.trim();
-                if !dir.is_empty() && !account.is_empty() {
-                    links.push((dir.to_string(), account.to_string()));
-                }
-            }
-        }
-        Ok(links)
+        Ok(content.lines().filter_map(parse_link_line).collect())
     }
 
-    pub fn get_link(&self, dir: &str) -> io::Result<Option<String>> {
+    pub fn find_link(&self, dir: &str) -> Result<Option<ResolvedLink>, LinkResolveError> {
         let links = self.all_links()?;
-        for (d, acc) in &links {
-            if d == dir {
-                return Ok(Some(acc.clone()));
-            }
+        let matches: Vec<(String, String)> = links
+            .into_iter()
+            .filter(|(stored, _)| crate::path_identity::equivalent(stored, dir))
+            .collect();
+        let Some((directory, account)) = matches.first() else {
+            return Ok(None);
+        };
+        if matches.iter().any(|(_, candidate)| candidate != account) {
+            return Err(LinkResolveError::Ambiguous {
+                directory: dir.to_string(),
+                mappings: matches,
+            });
         }
-        Ok(None)
+        Ok(Some(ResolvedLink {
+            directory: directory.clone(),
+            account: account.clone(),
+        }))
     }
 
     pub fn set_link(&self, dir: &str, account: &str) -> io::Result<()> {
         let mut links = self.all_links()?;
-        links.retain(|(d, _)| d != dir);
+        links.retain(|(stored, _)| !crate::path_identity::equivalent(stored, dir));
         links.push((dir.to_string(), account.to_string()));
         self.write_links(&links)
     }
@@ -185,7 +239,7 @@ impl AppConfig {
     pub fn remove_link(&self, dir: &str) -> io::Result<bool> {
         let mut links = self.all_links()?;
         let before = links.len();
-        links.retain(|(d, _)| d != dir);
+        links.retain(|(stored, _)| !crate::path_identity::equivalent(stored, dir));
         if links.len() == before {
             return Ok(false);
         }
@@ -319,6 +373,120 @@ mod tests {
         let raw = fs::read_to_string(c.config_path()).unwrap();
         assert_eq!(raw.matches("resume_hook=").count(), 1, "{}", raw);
         assert_eq!(c.get_setting("resume_hook").as_deref(), Some("on"));
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn link_parser_uses_the_rightmost_delimiter() {
+        assert_eq!(
+            parse_link_line(r"C:\repo=work"),
+            Some((r"C:\repo".to_string(), "work".to_string()))
+        );
+        assert_eq!(
+            parse_link_line(r"C:\repo=a=work"),
+            Some((r"C:\repo=a".to_string(), "work".to_string()))
+        );
+        assert_eq!(
+            parse_link_line(r"C:\a=b=c=personal1"),
+            Some((r"C:\a=b=c".to_string(), "personal1".to_string()))
+        );
+    }
+
+    #[test]
+    fn link_parser_ignores_malformed_lines() {
+        assert_eq!(parse_link_line("missing-delimiter"), None);
+        assert_eq!(parse_link_line("=work"), None);
+        assert_eq!(parse_link_line(r"C:\repo="), None);
+    }
+
+    #[test]
+    fn equals_path_round_trips_without_rewriting() {
+        let c = temp_config("equals-path");
+        c.set_link(r"C:\repo=a=b", "work").unwrap();
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![(r"C:\repo=a=b".to_string(), "work".to_string())]
+        );
+        let raw = fs::read_to_string(c.links_path()).unwrap();
+        assert_eq!(raw, "C:\\repo=a=b=work\n");
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn equivalent_aliases_for_one_account_resolve_without_ambiguity() {
+        let c = temp_config("same-account-aliases");
+        fs::write(c.links_path(), "C:\\Work=personal1\nc:/work/=personal1\n").unwrap();
+        let link = c.find_link(r"c:\WORK").unwrap().unwrap();
+        assert_eq!(link.directory, r"C:\Work");
+        assert_eq!(link.account, "personal1");
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn equivalent_aliases_for_different_accounts_are_ambiguous() {
+        let c = temp_config("conflicting-aliases");
+        fs::write(c.links_path(), "C:\\Work=personal1\nc:/work/=work\n").unwrap();
+        match c.find_link(r"c:\WORK") {
+            Err(LinkResolveError::Ambiguous { mappings, .. }) => {
+                assert_eq!(mappings.len(), 2)
+            }
+            other => panic!("expected ambiguity, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn setting_a_link_heals_aliases_and_preserves_unrelated_entries() {
+        let c = temp_config("heal-aliases");
+        fs::write(
+            c.links_path(),
+            "C:\\Work=personal1\nc:/work/=work\nC:\\Work-child=other\n",
+        )
+        .unwrap();
+        c.set_link(r"c:\WORK", "selected").unwrap();
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![
+                (r"C:\Work-child".to_string(), "other".to_string()),
+                (r"c:\WORK".to_string(), "selected".to_string())
+            ]
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unlink_removes_all_equivalent_aliases_only() {
+        let c = temp_config("unlink-aliases");
+        fs::write(
+            c.links_path(),
+            "C:\\Work=personal1\nc:/work/=work\nC:\\Work-child=other\n",
+        )
+        .unwrap();
+        assert!(c.remove_link(r"c:\WORK").unwrap());
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![(r"C:\Work-child".to_string(), "other".to_string())]
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn removing_an_account_still_removes_every_stored_path() {
+        let c = temp_config("remove-account-links");
+        fs::write(
+            c.links_path(),
+            "/one=work\n/path=with=equals=work\n/other=personal\n",
+        )
+        .unwrap();
+        c.remove_links_for_account("work").unwrap();
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![("/other".to_string(), "personal".to_string())]
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 

@@ -115,9 +115,10 @@ So you can move from one to the other without re-creating accounts or relinking 
 
 Account credentials, links, and the `default` setting carry over without any changes.
 
+Windows directory routing normalizes ordinary equivalent drive/case/slash/trailing/verbatim/UNC spellings at comparison time and uses physical identity for existing junction aliases. Stored link spelling remains unchanged for display, paths containing `=` are supported, and missing/offline paths continue to use lexical comparison. Conflicting equivalent aliases to different accounts fail closed; `link` or `unlink` repairs them explicitly. This comparison behavior is Windows-only and does not change Unix/macOS symlink semantics.
+
 ### Current Windows limits
 
-- Directory links still use exact raw path strings; drive/slash/case, junction, UNC and verbatim-path normalization is deferred.
 - The VS Code native UI has a separate process-wrapper calling convention and is not wired to the PATH shim. Terminals and launchers that honor `PATH` are covered.
 - Per-account Windows `ide/` lock-directory sharing is not installed.
 - Cross-account resume reuses the current session-copy implementation; Windows overwrite/rollback transaction hardening is deferred.

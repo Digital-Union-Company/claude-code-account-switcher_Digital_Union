@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::i18n::I18n;
 use crate::resolve;
 use std::path::Path;
 
@@ -8,17 +9,21 @@ pub enum ShellSyntax {
     PowerShell,
 }
 
-pub fn run(config: &AppConfig, shell: ShellSyntax) {
+pub fn run(config: &AppConfig, i18n: &I18n, shell: ShellSyntax) -> i32 {
     let cwd = std::env::current_dir().expect("Cannot get current directory");
-    let account = resolve::resolve_account(config, &cwd);
+    let account = match resolve::resolve_account(config, &cwd) {
+        Ok(account) => account,
+        Err(error) => {
+            // stdout is eval'd by shell integration. Keep the diagnostic on
+            // stderr and emit only a safe removal action on stdout.
+            eprintln!("{}", resolve::error_message(i18n, &error));
+            print_default_action(shell);
+            return 1;
+        }
+    };
 
     match account.as_deref() {
-        Some("default") | None => match shell {
-            ShellSyntax::Posix => println!("unset CLAUDE_CONFIG_DIR"),
-            ShellSyntax::PowerShell => {
-                println!("Remove-Item Env:\\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue")
-            }
-        },
+        Some("default") | None => print_default_action(shell),
         Some(name) => {
             let path = config.account_path(name);
             if path.is_dir() {
@@ -27,13 +32,18 @@ pub fn run(config: &AppConfig, shell: ShellSyntax) {
                     ShellSyntax::PowerShell => println!("{}", powershell_assignment(&path)),
                 }
             } else {
-                match shell {
-                    ShellSyntax::Posix => println!("unset CLAUDE_CONFIG_DIR"),
-                    ShellSyntax::PowerShell => println!(
-                        "Remove-Item Env:\\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue"
-                    ),
-                }
+                print_default_action(shell);
             }
+        }
+    }
+    0
+}
+
+fn print_default_action(shell: ShellSyntax) {
+    match shell {
+        ShellSyntax::Posix => println!("unset CLAUDE_CONFIG_DIR"),
+        ShellSyntax::PowerShell => {
+            println!("Remove-Item Env:\\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue")
         }
     }
 }

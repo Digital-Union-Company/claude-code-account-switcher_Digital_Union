@@ -5,7 +5,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::commands::install::binary_name;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LinkResolveError};
 use crate::i18n::{I18n, Msg};
 use crate::resolve;
 
@@ -233,14 +233,24 @@ fn command_path(bin: &Path) -> String {
 
 fn install_into_settings(config: &AppConfig, i18n: &I18n) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_default();
+    let standard_dir = dirs::home_dir().unwrap_or_default().join(".claude");
+    install_into_settings_for(config, i18n, &cwd, &standard_dir)
+}
+
+fn install_into_settings_for(
+    config: &AppConfig,
+    i18n: &I18n,
+    cwd: &Path,
+    standard_dir: &Path,
+) -> i32 {
     // The account this directory currently resolves to (managed account or the
     // standard ~/.claude when there's no link / default).
-    let (label, settings_dir) = match resolve::resolve_account(config, &cwd) {
-        Some(name) => (name.clone(), config.account_path(&name)),
-        None => (
-            "default".to_string(),
-            dirs::home_dir().unwrap_or_default().join(".claude"),
-        ),
+    let (label, settings_dir) = match statusline_target(config, cwd, standard_dir) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("{}", resolve::error_message(i18n, &error));
+            return 1;
+        }
     };
 
     if let Err(e) = std::fs::create_dir_all(&settings_dir) {
@@ -281,9 +291,35 @@ fn install_into_settings(config: &AppConfig, i18n: &I18n) -> i32 {
     0
 }
 
+fn statusline_target(
+    config: &AppConfig,
+    cwd: &Path,
+    standard_dir: &Path,
+) -> Result<(String, std::path::PathBuf), LinkResolveError> {
+    match resolve::resolve_account(config, cwd)? {
+        Some(name) if name != "default" => {
+            let settings_dir = config.account_path(&name);
+            Ok((name, settings_dir))
+        }
+        Some(_) | None => Ok(("default".to_string(), standard_dir.to_path_buf())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn scratch(tag: &str) -> (std::path::PathBuf, AppConfig) {
+        let root = std::env::temp_dir().join(format!("cc-statusline-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let config = AppConfig {
+            base_dir: root.join("manager"),
+        };
+        config.init().unwrap();
+        (root, config)
+    }
 
     #[test]
     fn usage_segment_includes_rounded_percent() {
@@ -431,5 +467,103 @@ mod tests {
             "command path must not contain backslashes: {rendered:?}"
         );
         assert!(rendered.contains("bin/claude-acc"), "got {rendered:?}");
+    }
+
+    #[test]
+    fn named_statusline_target_is_the_managed_account() {
+        let (root, config) = scratch("named-target");
+        let repo = root.join("repo");
+        let standard = root.join("standard");
+        fs::create_dir_all(config.account_path("work")).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        config.set_link(repo.to_str().unwrap(), "work").unwrap();
+
+        assert_eq!(
+            statusline_target(&config, &repo, &standard).unwrap(),
+            ("work".to_string(), config.account_path("work"))
+        );
+        let i18n = I18n {
+            lang: crate::i18n::Lang::En,
+        };
+        assert_eq!(
+            install_into_settings_for(&config, &i18n, &repo, &standard),
+            0
+        );
+        assert!(config.account_path("work").join("settings.json").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn implicit_and_explicit_default_use_the_standard_directory() {
+        let (root, config) = scratch("default-target");
+        let implicit = root.join("implicit");
+        let explicit = root.join("explicit");
+        let standard = root.join("standard-claude");
+        fs::create_dir_all(&implicit).unwrap();
+        fs::create_dir_all(&explicit).unwrap();
+        config
+            .set_link(explicit.to_str().unwrap(), "default")
+            .unwrap();
+
+        for cwd in [&implicit, &explicit] {
+            assert_eq!(
+                statusline_target(&config, cwd, &standard).unwrap(),
+                ("default".to_string(), standard.clone())
+            );
+        }
+        let i18n = I18n {
+            lang: crate::i18n::Lang::En,
+        };
+        assert_eq!(
+            install_into_settings_for(&config, &i18n, &explicit, &standard),
+            0
+        );
+        assert!(standard.join("settings.json").is_file());
+        assert!(!config.account_path("default").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configured_named_default_uses_its_managed_directory() {
+        let (root, config) = scratch("named-default-target");
+        let repo = root.join("repo");
+        let standard = root.join("standard");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(config.account_path("work")).unwrap();
+        config.set_default("work").unwrap();
+
+        assert_eq!(
+            statusline_target(&config, &repo, &standard).unwrap(),
+            ("work".to_string(), config.account_path("work"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ambiguity_fails_before_any_settings_mutation() {
+        let (root, config) = scratch("ambiguous-target");
+        let standard = root.join("standard");
+        fs::write(
+            config.links_path(),
+            "C:\\Work=personal1\nc:/work/=personal2\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            install_into_settings_for(
+                &config,
+                &I18n {
+                    lang: crate::i18n::Lang::En,
+                },
+                Path::new(r"c:\WORK"),
+                &standard,
+            ),
+            1
+        );
+        assert!(!standard.join("settings.json").exists());
+        assert!(!config.account_path("personal1").exists());
+        assert!(!config.account_path("personal2").exists());
+        let _ = fs::remove_dir_all(root);
     }
 }
