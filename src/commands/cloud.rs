@@ -40,14 +40,11 @@ fn is_existing_session_locator(value: &str) -> bool {
 }
 
 fn is_cloud_session_id(value: &str) -> bool {
-    ["session_", "cse_"]
-        .iter()
-        .copied()
-        .any(|prefix| {
-            value
-                .strip_prefix(prefix)
-                .is_some_and(|rest| !rest.is_empty())
-        })
+    ["session_", "cse_"].iter().copied().any(|prefix| {
+        value
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty())
+    })
 }
 
 fn build_process(config: &AppConfig, description: &str, profile: ClaudeProfile) -> ClaudeProcess {
@@ -122,7 +119,10 @@ mod tests {
     #[test]
     fn empty_and_whitespace_only_descriptions_are_rejected() {
         assert_eq!(validate_description(""), Err(DescriptionError::Empty));
-        assert_eq!(validate_description(" \t\r\n"), Err(DescriptionError::Empty));
+        assert_eq!(
+            validate_description(" \t\r\n"),
+            Err(DescriptionError::Empty)
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ assert_capture() {
     local label="$1"
     shift
     local got="$(<"$capture")"
-    local want="${(j:\n:)@}"
+    local want="$(printf '%s\n' "$@")"
     if [[ "$got" == "$want" ]]; then
         print -r -- "ok   — $label"
     else

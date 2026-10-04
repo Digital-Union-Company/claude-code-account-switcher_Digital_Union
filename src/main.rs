@@ -392,20 +392,10 @@ fn main() {
         }
         Some(Commands::Run { name, args }) => commands::run::run(&config, &i18n, &name, &args),
         Some(Commands::Cloud { name, description }) => {
-            std::process::exit(commands::cloud::run(
-                &config,
-                &i18n,
-                &name,
-                &description,
-            ))
+            std::process::exit(commands::cloud::run(&config, &i18n, &name, &description))
         }
         Some(Commands::Teleport { name, session_id }) => {
-            std::process::exit(commands::teleport::run(
-                &config,
-                &i18n,
-                &name,
-                &session_id,
-            ))
+            std::process::exit(commands::teleport::run(&config, &i18n, &name, &session_id))
         }
         Some(Commands::Sessions { all }) => {
             std::process::exit(commands::sessions::run(&config, &i18n, all))

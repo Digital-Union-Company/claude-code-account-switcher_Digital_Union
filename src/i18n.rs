@@ -100,12 +100,12 @@ impl I18n {
                  command only starts new sessions; use `claude-acc teleport` \
                  to bring an existing session into the terminal.",
             ),
-            (Msg::CloudExistingSessionLocator, Lang::Ru) => s(
-                "Это описание указывает на существующую облачную сессию. \
+            (Msg::CloudExistingSessionLocator, Lang::Ru) => {
+                s("Это описание указывает на существующую облачную сессию. \
                  Команда запускает только новые сессии; чтобы перенести \
                  существующую сессию в терминал, используйте \
-                 `claude-acc teleport`.",
-            ),
+                 `claude-acc teleport`.")
+            }
             (Msg::TeleportSessionEmpty, Lang::En) => {
                 s("Cloud session identifier must not be empty.")
             }
