@@ -105,7 +105,7 @@ Id сессий намеренно ограничены текущей дире�
 Поэтому переключаться можно без пересоздания аккаунтов и перепривязок. Шаги:
 
 **Shell → Rust:**
-1. Установить Rust-бинарник: скачать из [Releases](https://github.com/Nemo-Illusionist/claude-code-account-switcher/releases) и запустить `claude-acc install`. Эта команда сама добавит свою shell-init строку.
+1. Установить Rust-бинарник: скачать из [Releases](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/releases) и запустить `claude-acc install`. Эта команда сама добавит свою shell-init строку.
 2. Удалить строку `source ~/.claude-switch.sh` из `~/.zshrc` (за активацию теперь отвечает Rust-init).
 3. По желанию — `rm ~/.claude-switch.sh`.
 

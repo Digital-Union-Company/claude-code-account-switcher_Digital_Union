@@ -2159,7 +2159,7 @@ _claude_acc_update() {
         return 1
     fi
 
-    local raw="https://raw.githubusercontent.com/Nemo-Illusionist/claude-code-account-switcher/master/claude-switch.sh"
+    local raw="https://raw.githubusercontent.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/master/claude-switch.sh"
     local tmp="${script}.new"
 
     _msg update_fetching

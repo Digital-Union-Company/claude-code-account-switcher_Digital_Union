@@ -5,7 +5,7 @@ edition = "2024"
 description = "Claude Code Account Switcher — bind different accounts to different directories"
 authors = ["Petr Radilov"]
 license = "MIT"
-repository = "https://github.com/Nemo-Illusionist/claude-code-account-switcher"
+repository = "https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union"
 
 [dependencies]
 aes = "0.9"

@@ -22,7 +22,7 @@ You don't switch accounts — you `cd`. `CLAUDE_CONFIG_DIR` is resolved per shel
 
 ### Rust CLI (recommended)
 
-Download from [GitHub Releases](https://github.com/Nemo-Illusionist/claude-code-account-switcher/releases), then run:
+Download from [GitHub Releases](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/releases), then run:
 
 ```bash
 claude-acc install
