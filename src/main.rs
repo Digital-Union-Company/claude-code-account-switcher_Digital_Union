@@ -467,9 +467,7 @@ fn main() {
         Some(Commands::Doctor { json }) => {
             std::process::exit(commands::doctor::run(&config, &i18n, json))
         }
-        Some(Commands::Whoami) => {
-            std::process::exit(commands::whoami::run(&config, &i18n))
-        }
+        Some(Commands::Whoami) => std::process::exit(commands::whoami::run(&config, &i18n)),
         Some(Commands::Install) => commands::install::run(&config, &i18n),
         Some(Commands::Vscode { action }) => std::process::exit(match action {
             VscodeCommands::Install { force } => commands::vscode::install(&config, &i18n, force),

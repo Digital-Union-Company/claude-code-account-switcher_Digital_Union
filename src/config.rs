@@ -416,11 +416,7 @@ mod tests {
     #[test]
     fn equivalent_aliases_for_one_account_resolve_without_ambiguity() {
         let c = temp_config("same-account-aliases");
-        fs::write(
-            c.links_path(),
-            "C:\\Work=personal1\nc:/work/=personal1\n",
-        )
-        .unwrap();
+        fs::write(c.links_path(), "C:\\Work=personal1\nc:/work/=personal1\n").unwrap();
         let link = c.find_link(r"c:\WORK").unwrap().unwrap();
         assert_eq!(link.directory, r"C:\Work");
         assert_eq!(link.account, "personal1");

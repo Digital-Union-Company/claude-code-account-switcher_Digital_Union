@@ -3,10 +3,7 @@ use crate::i18n::{I18n, Msg};
 use std::path::Path;
 
 /// Walk up from `dir` to root, checking links for each ancestor.
-pub fn resolve_account(
-    config: &AppConfig,
-    dir: &Path,
-) -> Result<Option<String>, LinkResolveError> {
+pub fn resolve_account(config: &AppConfig, dir: &Path) -> Result<Option<String>, LinkResolveError> {
     let mut current = dir.to_path_buf();
     loop {
         if let Some(dir_str) = current.to_str()
@@ -90,10 +87,7 @@ mod tests {
             Some("inner")
         );
         assert_eq!(
-            find_linked_dir(&config, &child)
-                .unwrap()
-                .unwrap()
-                .directory,
+            find_linked_dir(&config, &child).unwrap().unwrap().directory,
             inner.to_string_lossy()
         );
         let _ = fs::remove_dir_all(root);

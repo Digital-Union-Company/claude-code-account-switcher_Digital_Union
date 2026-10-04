@@ -311,8 +311,7 @@ mod tests {
     use std::fs;
 
     fn scratch(tag: &str) -> (std::path::PathBuf, AppConfig) {
-        let root =
-            std::env::temp_dir().join(format!("cc-statusline-{tag}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cc-statusline-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let config = AppConfig {
@@ -486,7 +485,10 @@ mod tests {
         let i18n = I18n {
             lang: crate::i18n::Lang::En,
         };
-        assert_eq!(install_into_settings_for(&config, &i18n, &repo, &standard), 0);
+        assert_eq!(
+            install_into_settings_for(&config, &i18n, &repo, &standard),
+            0
+        );
         assert!(config.account_path("work").join("settings.json").is_file());
         let _ = fs::remove_dir_all(root);
     }

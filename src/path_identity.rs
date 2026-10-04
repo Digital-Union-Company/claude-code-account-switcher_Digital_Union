@@ -41,11 +41,7 @@ fn windows_lexical_key(path: &str) -> WindowsPathKey {
     }
 
     let bytes = path.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes[2] == b'\\'
-    {
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
         let drive = (bytes[0] as char).to_ascii_lowercase();
         let components = normalize_components(&path[3..], true);
         return WindowsPathKey {
@@ -176,10 +172,7 @@ fn windows_equivalent(left: &str, right: &str) -> bool {
         return false;
     }
 
-    let (Ok(left), Ok(right)) = (
-        std::fs::canonicalize(left),
-        std::fs::canonicalize(right),
-    ) else {
+    let (Ok(left), Ok(right)) = (std::fs::canonicalize(left), std::fs::canonicalize(right)) else {
         return false;
     };
     windows_lexical_key(left.to_string_lossy().as_ref())
@@ -222,17 +215,17 @@ mod tests {
     #[test]
     fn verbatim_drive_and_unc_forms_match_ordinary_forms() {
         same(r"\\?\C:\Work\Project", r"C:\Work\Project");
-        same(
-            r"\\?\UNC\server\share\Project",
-            r"\\server\share\Project",
-        );
+        same(r"\\?\UNC\server\share\Project", r"\\server\share\Project");
         same(r"\\?\C:\", r"C:\");
         same(r"\\?\UNC\server\share\", r"\\server\share\");
     }
 
     #[test]
     fn drive_relative_is_not_drive_absolute() {
-        assert_ne!(windows_lexical_key(r"C:foo"), windows_lexical_key(r"C:\foo"));
+        assert_ne!(
+            windows_lexical_key(r"C:foo"),
+            windows_lexical_key(r"C:\foo")
+        );
         assert!(!windows_lexical_key(r"C:foo").absolute);
         assert!(windows_lexical_key(r"C:\foo").absolute);
     }

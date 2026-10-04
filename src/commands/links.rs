@@ -58,8 +58,7 @@ pub fn run(config: &AppConfig, i18n: &I18n) -> i32 {
                 i18n.msg(Msg::LinksConflict)
             );
         } else if active_link.as_ref().is_some_and(|active| {
-            active.account == *account
-                && crate::path_identity::equivalent(&active.directory, dir)
+            active.account == *account && crate::path_identity::equivalent(&active.directory, dir)
         }) {
             println!(
                 "  {} → {}  {}",
@@ -71,9 +70,5 @@ pub fn run(config: &AppConfig, i18n: &I18n) -> i32 {
             println!("  {} → {}", display, account);
         }
     }
-    if failed {
-        1
-    } else {
-        0
-    }
+    if failed { 1 } else { 0 }
 }

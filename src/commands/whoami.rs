@@ -10,8 +10,8 @@
 // conflicts fail closed instead of presenting a fallback identity as valid.
 
 use crate::config::{AppConfig, LinkResolveError};
-use crate::identity;
 use crate::i18n::I18n;
+use crate::identity;
 use crate::resolve;
 use std::path::Path;
 
