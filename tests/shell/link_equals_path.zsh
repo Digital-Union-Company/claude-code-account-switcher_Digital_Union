@@ -30,11 +30,11 @@ check() {
 check 'link stores the full equals path' "$linked=work" "$(<"$CLAUDE_SWITCH_LINKS")"
 check 'resolver reads account after the final delimiter' 'work' "$(_claude_find_account "$linked")"
 
-status=$(cd "$linked" && claude-acc status)
-if [[ "$status" == *"work"* ]]; then
+status_output=$(cd "$linked" && claude-acc status)
+if [[ "$status_output" == *"work"* ]]; then
     print -r -- 'ok   — status resolves equals path'
 else
-    print -r -- "FAIL — status did not resolve equals path: $status"
+    print -r -- "FAIL — status did not resolve equals path: $status_output"
     (( failures++ ))
 fi
 
