@@ -196,6 +196,20 @@ impl I18n {
             (Msg::LinkDone(ref dir, ref n), Lang::Ru) => format!("{} → аккаунт '{}'", dir, n),
             (Msg::LinkDoneDefault(ref dir), Lang::En) => format!("{} → ~/.claude/ (default)", dir),
             (Msg::LinkDoneDefault(ref dir), Lang::Ru) => format!("{} → ~/.claude/ (default)", dir),
+            (Msg::LinkIdentityConflict(ref dir, ref mappings), Lang::En) => format!(
+                "Equivalent directory links for '{}' point to different accounts: {}\nResolve them with 'claude-acc link <account>', 'claude-acc unlink', or edit the links file.",
+                dir, mappings
+            ),
+            (Msg::LinkIdentityConflict(ref dir, ref mappings), Lang::Ru) => format!(
+                "Эквивалентные привязки директории '{}' указывают на разные аккаунты: {}\nИсправьте их командой 'claude-acc link <аккаунт>', 'claude-acc unlink' или отредактируйте файл links.",
+                dir, mappings
+            ),
+            (Msg::LinkResolveFailed(ref e), Lang::En) => {
+                format!("Could not resolve directory links: {}", e)
+            }
+            (Msg::LinkResolveFailed(ref e), Lang::Ru) => {
+                format!("Не удалось определить привязки директорий: {}", e)
+            }
 
             // unlink
             (Msg::UnlinkNone, Lang::En) => s("No link for the current directory."),
@@ -229,6 +243,8 @@ impl I18n {
             (Msg::LinksHeader, Lang::Ru) => s("Привязки:"),
             (Msg::LinksActive, Lang::En) => s("← active"),
             (Msg::LinksActive, Lang::Ru) => s("← активна"),
+            (Msg::LinksConflict, Lang::En) => s("← conflict"),
+            (Msg::LinksConflict, Lang::Ru) => s("← конфликт"),
 
             // reserved
             (Msg::ReservedName(ref n), Lang::En) => format!("'{}' is a reserved name.", n),
@@ -1322,6 +1338,8 @@ pub enum Msg {
     LinkNotFound(String),
     LinkDone(String, String),
     LinkDoneDefault(String),
+    LinkIdentityConflict(String, String),
+    LinkResolveFailed(String),
     UnlinkNone,
     UnlinkDone(String),
     StatusActive(String, String),
@@ -1331,6 +1349,7 @@ pub enum Msg {
     LinksEmpty,
     LinksHeader,
     LinksActive,
+    LinksConflict,
     ReservedName(String),
     NameInvalid,
     InstallUpToDate(String),

@@ -478,15 +478,18 @@ _claude_switch_init
 # 1. Paths can contain regex metacharacters (`.`, `[`, `+` etc. — common
 #    on macOS) which break anchored-grep with over-matching.
 # 2. `sed -i ''` for line deletion also treats the pattern as regex.
-# `[[ "$line" == "${dir}="* ]]` uses a glob pattern with a literal prefix
-# and a single trailing `*` — no surprises with metacharacters in `$dir`.
+# The account name is the field after the final `=`. Paths may contain earlier
+# equals signs, so every parser below uses `${line%=*}` / `${line##*=}`.
 
 _claude_links_has_dir() {
     local dir="$1"
     [[ -z "$dir" || ! -f "$CLAUDE_SWITCH_LINKS" ]] && return 1
-    local line
+    local line stored account
     while IFS= read -r line; do
-        [[ "$line" == "${dir}="* ]] && return 0
+        [[ "$line" == *"="* ]] || continue
+        stored="${line%=*}"
+        account="${line##*=}"
+        [[ -n "$stored" && -n "$account" && "$stored" == "$dir" ]] && return 0
     done < "$CLAUDE_SWITCH_LINKS"
     return 1
 }
@@ -494,10 +497,17 @@ _claude_links_has_dir() {
 _claude_links_remove_dir() {
     local dir="$1"
     [[ -z "$dir" || ! -f "$CLAUDE_SWITCH_LINKS" ]] && return 0
-    local tmpfile line
+    local tmpfile line stored account
     tmpfile=$(mktemp) || return 1
     while IFS= read -r line; do
-        [[ "$line" == "${dir}="* ]] || printf '%s\n' "$line"
+        if [[ "$line" == *"="* ]]; then
+            stored="${line%=*}"
+            account="${line##*=}"
+        else
+            stored=""
+            account=""
+        fi
+        [[ -n "$stored" && -n "$account" && "$stored" == "$dir" ]] || printf '%s\n' "$line"
     done < "$CLAUDE_SWITCH_LINKS" > "$tmpfile"
     mv "$tmpfile" "$CLAUDE_SWITCH_LINKS"
 }
@@ -511,10 +521,13 @@ _claude_default_account() {
 _claude_dir_account() {
     local dir="$1"
     [[ -z "$dir" || ! -f "$CLAUDE_SWITCH_LINKS" ]] && return 1
-    local line
+    local line stored account
     while IFS= read -r line; do
-        if [[ "$line" == "${dir}="* ]]; then
-            echo "${line#*=}"
+        [[ "$line" == *"="* ]] || continue
+        stored="${line%=*}"
+        account="${line##*=}"
+        if [[ -n "$stored" && -n "$account" && "$stored" == "$dir" ]]; then
+            echo "$account"
             return 0
         fi
     done < "$CLAUDE_SWITCH_LINKS"
@@ -970,7 +983,9 @@ _claude_acc_links() {
     local active_dir
     active_dir=$(_claude_find_linked_dir)
 
-    sort "$CLAUDE_SWITCH_LINKS" | while IFS='=' read -r dir account; do
+    sort "$CLAUDE_SWITCH_LINKS" | while IFS= read -r line; do
+        [[ "$line" == *"="* ]] || continue
+        local dir="${line%=*}" account="${line##*=}"
         [[ -z "$dir" || -z "$account" ]] && continue
         local display_dir="${dir/#$HOME/~}"
         if [[ "$dir" == "$active_dir" ]]; then

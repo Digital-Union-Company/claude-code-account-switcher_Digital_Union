@@ -3,28 +3,31 @@ use crate::i18n::{I18n, Msg};
 use crate::identity;
 use crate::resolve;
 
-pub fn run(config: &AppConfig, i18n: &I18n) {
+pub fn run(config: &AppConfig, i18n: &I18n) -> i32 {
     let cwd = std::env::current_dir().expect("Cannot get current directory");
 
-    let linked_dir = resolve::find_linked_dir(config, &cwd);
-
-    if let Some(ref ld) = linked_dir {
-        let account = config.get_link(ld).ok().flatten();
-        if let Some(ref acc) = account {
-            let dir_name = std::path::Path::new(ld)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(ld);
-            let info = i18n.msg(Msg::StatusLinked(dir_name.to_string()));
-            i18n.print(Msg::StatusActive(label(config, acc), info));
-            return;
+    let linked = match resolve::find_linked_dir(config, &cwd) {
+        Ok(linked) => linked,
+        Err(error) => {
+            eprintln!("{}", resolve::error_message(i18n, &error));
+            return 1;
         }
+    };
+
+    if let Some(link) = linked {
+        let dir_name = std::path::Path::new(&link.directory)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&link.directory);
+        let info = i18n.msg(Msg::StatusLinked(dir_name.to_string()));
+        i18n.print(Msg::StatusActive(label(config, &link.account), info));
+        return 0;
     }
 
     if let Ok(Some(ref acc)) = config.get_default() {
         let info = i18n.msg(Msg::StatusDefault);
         i18n.print(Msg::StatusActive(label(config, acc), info));
-        return;
+        return 0;
     }
 
     // Standard ~/.claude/ — show email if doctor cached one for it.
@@ -38,6 +41,7 @@ pub fn run(config: &AppConfig, i18n: &I18n) {
     } else {
         i18n.print(Msg::StatusStandard);
     }
+    0
 }
 
 /// "<acc>" or "<acc> <email>" or "<acc> <email *>" depending on what's

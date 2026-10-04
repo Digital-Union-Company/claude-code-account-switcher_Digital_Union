@@ -11,6 +11,7 @@ mod environment;
 mod i18n;
 mod ide;
 mod identity;
+mod path_identity;
 mod powershell;
 mod resolve;
 mod seed;
@@ -396,8 +397,18 @@ fn main() {
         Some(Commands::Reset) => commands::reset::run(&config, &i18n),
         Some(Commands::Link { name }) => commands::link::run(&config, &i18n, &name),
         Some(Commands::Unlink) => commands::unlink::run(&config, &i18n),
-        Some(Commands::Links) => commands::links::run(&config, &i18n),
-        Some(Commands::Status) => commands::status::run(&config, &i18n),
+        Some(Commands::Links) => {
+            let code = commands::links::run(&config, &i18n);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some(Commands::Status) => {
+            let code = commands::status::run(&config, &i18n);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Some(Commands::Usage) => commands::usage::run(&config, &i18n),
         Some(Commands::Statusline { install }) => {
             std::process::exit(commands::statusline::run(&config, &i18n, install))
@@ -456,7 +467,9 @@ fn main() {
         Some(Commands::Doctor { json }) => {
             std::process::exit(commands::doctor::run(&config, &i18n, json))
         }
-        Some(Commands::Whoami) => commands::whoami::run(&config),
+        Some(Commands::Whoami) => {
+            std::process::exit(commands::whoami::run(&config, &i18n))
+        }
         Some(Commands::Install) => commands::install::run(&config, &i18n),
         Some(Commands::Vscode { action }) => std::process::exit(match action {
             VscodeCommands::Install { force } => commands::vscode::install(&config, &i18n, force),
@@ -474,7 +487,7 @@ fn main() {
                 "powershell" | "pwsh" => ShellSyntax::PowerShell,
                 _ => ShellSyntax::Posix,
             };
-            commands::activate::run(&config, syntax);
+            std::process::exit(commands::activate::run(&config, &i18n, syntax));
         }
         Some(Commands::Init { shell }) => commands::init::run(&shell),
         Some(Commands::Completions { what }) => commands::completions::run(&config, &what),

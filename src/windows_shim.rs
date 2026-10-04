@@ -46,8 +46,11 @@ struct ShimTarget {
 /// shell activation: a valid named account selects its managed directory;
 /// `default`, no mapping, or a stale mapping selects upstream default state.
 #[cfg(any(windows, test))]
-fn target_for_cwd(config: &AppConfig, cwd: &Path) -> ShimTarget {
-    match crate::resolve::resolve_account(config, cwd) {
+fn target_for_cwd(
+    config: &AppConfig,
+    cwd: &Path,
+) -> Result<ShimTarget, crate::config::LinkResolveError> {
+    let target = match crate::resolve::resolve_account(config, cwd)? {
         Some(name) if name != crate::sessions::DEFAULT_LABEL && config.account_exists(&name) => {
             let dir = config.account_path(&name);
             ShimTarget {
@@ -61,7 +64,8 @@ fn target_for_cwd(config: &AppConfig, cwd: &Path) -> ShimTarget {
             label: crate::sessions::DEFAULT_LABEL.to_string(),
             resume_dir: crate::identity::standard_token_dir(),
         },
-    }
+    };
+    Ok(target)
 }
 
 /// Whether the forwarded argv contains a concrete resume id/name. A bare
@@ -103,7 +107,13 @@ pub(crate) fn run() -> i32 {
         .expect("Failed to initialize config directory");
     let i18n = crate::i18n::I18n::new();
     let cwd = crate::claude_process::current_dir();
-    let target = target_for_cwd(&config, &cwd);
+    let target = match target_for_cwd(&config, &cwd) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("{}", crate::resolve::error_message(&i18n, &error));
+            return 1;
+        }
+    };
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     // Windows command-line arguments are Unicode, but retain the original
@@ -215,7 +225,7 @@ mod tests {
         fs::create_dir_all(config.account_path("work")).unwrap();
         config.set_link(repo.to_str().unwrap(), "work").unwrap();
 
-        let target = target_for_cwd(&config, &repo.join("nested"));
+        let target = target_for_cwd(&config, &repo.join("nested")).unwrap();
         assert_eq!(
             target.profile,
             ClaudeProfile::Named(config.account_path("work"))
@@ -242,7 +252,7 @@ mod tests {
             .unwrap();
 
         for dir in [&explicit, &stale, &unlinked] {
-            let target = target_for_cwd(&config, dir);
+            let target = target_for_cwd(&config, dir).unwrap();
             assert_eq!(target.profile, ClaudeProfile::Default, "{dir:?}");
             assert_eq!(target.label, crate::sessions::DEFAULT_LABEL);
         }
@@ -257,12 +267,29 @@ mod tests {
         fs::create_dir_all(config.account_path("work")).unwrap();
         config.set_default("work").unwrap();
 
-        let target = target_for_cwd(&config, &unlinked);
+        let target = target_for_cwd(&config, &unlinked).unwrap();
         assert_eq!(
             target.profile,
             ClaudeProfile::Named(config.account_path("work"))
         );
         assert_eq!(target.label, "work");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conflicting_equivalent_links_stop_shim_target_selection() {
+        let (root, config) = scratch("conflict");
+        fs::write(
+            config.links_path(),
+            "C:\\Work=personal1\nc:/work/=personal2\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            target_for_cwd(&config, Path::new(r"c:\WORK")),
+            Err(crate::config::LinkResolveError::Ambiguous { .. })
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
