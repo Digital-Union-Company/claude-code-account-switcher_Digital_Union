@@ -194,3 +194,5 @@ try {
     if (Test-Path -LiteralPath $claudeLink) { Remove-Item -LiteralPath $claudeLink -Force }
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
+
+exit 0
