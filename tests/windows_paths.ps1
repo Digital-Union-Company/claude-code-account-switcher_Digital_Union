@@ -124,7 +124,8 @@ try {
     New-Item -ItemType Directory -Force -Path $equalsDir | Out-Null
     $linkEquals = Invoke-ManagerCapture 'equals-link' $equalsDir @('link', 'personal1')
     Assert-Equal $linkEquals.Code 0 'equals path link'
-    Assert-Equal ((Get-Content -LiteralPath $linksFile -Raw).TrimEnd()) "$equalsDir=personal1" 'equals path round-trip'
+    $equalsLines = @(Get-Content -LiteralPath $linksFile | Where-Object { $_ -ne '' })
+    Assert-True ($equalsLines -contains "$equalsDir=personal1") 'equals path did not round-trip'
     $statusEquals = Invoke-ManagerCapture 'equals-status' $equalsDir @('status')
     Assert-Equal $statusEquals.Code 0 'equals path status'
     Assert-True $statusEquals.Stdout.Contains('personal1') 'status did not resolve equals path'
@@ -132,7 +133,9 @@ try {
     Assert-Equal ([IO.Path]::GetFullPath($equalsShim.config_dir)) ([IO.Path]::GetFullPath($logicalPersonal1)) 'equals path shim route'
     $unlinkEquals = Invoke-ManagerCapture 'equals-unlink' $equalsDir @('unlink')
     Assert-Equal $unlinkEquals.Code 0 'equals path unlink'
-    Assert-Equal (Get-Content -LiteralPath $linksFile -Raw) '' 'equals path remained after unlink'
+    $equalsAfterUnlink = @(Get-Content -LiteralPath $linksFile | Where-Object { $_ -ne '' })
+    Assert-True ($equalsAfterUnlink -notcontains "$equalsDir=personal1") 'equals path remained after unlink'
+    Assert-True ($equalsAfterUnlink.Count -gt 0) 'unlink removed an unrelated mapping'
 
     $target = Join-Path $root 'junction-target'
     $junction = Join-Path $root 'junction-display'
