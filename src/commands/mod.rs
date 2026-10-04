@@ -1,6 +1,7 @@
 pub mod activate;
 pub mod add;
 pub mod clone_settings;
+pub mod cloud;
 pub mod completions;
 pub mod default;
 pub mod desktop;
@@ -21,17 +22,35 @@ pub mod session;
 pub mod sessions;
 pub mod status;
 pub mod statusline;
+pub mod teleport;
 pub mod unlink;
 pub mod update;
 pub mod usage;
 pub mod vscode;
 pub mod whoami;
 
-use crate::claude_process::{ClaudeProcess, LaunchError};
-use crate::config::AppConfig;
+use crate::claude_process::{ClaudeProcess, ClaudeProfile, LaunchError};
+use crate::config::{AppConfig, validate_name};
 use crate::i18n::{I18n, Msg};
 use crate::identity;
 use std::path::PathBuf;
+
+/// Resolve a user-facing account name into the profile used by every
+/// dedicated Claude launch command. Environment isolation remains entirely
+/// inside `ClaudeProcess`; this helper only preserves the existing account
+/// validation and `default` marker semantics.
+fn profile_for_account(config: &AppConfig, name: &str) -> Result<ClaudeProfile, Msg> {
+    if name == "default" {
+        return Ok(ClaudeProfile::Default);
+    }
+    if !validate_name(name) {
+        return Err(Msg::NameInvalid);
+    }
+    if !config.account_exists(name) {
+        return Err(Msg::LoginNotFound(name.to_string()));
+    }
+    Ok(ClaudeProfile::Named(config.account_path(name)))
+}
 
 /// Run a prepared `claude` invocation and return its exit code.
 ///
@@ -97,6 +116,7 @@ fn known_account_cache_paths(config: &AppConfig, exclude_label: &str) -> Vec<(St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn i18n() -> I18n {
         I18n {
@@ -132,5 +152,36 @@ mod tests {
     #[test]
     fn the_exit_code_of_claude_is_passed_through() {
         assert_eq!(report_claude_result(Ok(3), &i18n()), 3);
+    }
+
+    #[test]
+    fn account_profile_selection_covers_named_default_invalid_and_missing() {
+        let root = std::env::temp_dir().join(format!("cc-r2-profile-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        let config = AppConfig {
+            base_dir: root.clone(),
+        };
+        fs::create_dir_all(config.account_path("personal1")).unwrap();
+
+        assert_eq!(
+            profile_for_account(&config, "personal1").ok(),
+            Some(ClaudeProfile::Named(config.account_path("personal1")))
+        );
+        assert_eq!(
+            profile_for_account(&config, "default").ok(),
+            Some(ClaudeProfile::Default)
+        );
+        assert!(matches!(
+            profile_for_account(&config, "bad/name"),
+            Err(Msg::NameInvalid)
+        ));
+        assert!(matches!(
+            profile_for_account(&config, "missing"),
+            Err(Msg::LoginNotFound(_))
+        ));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

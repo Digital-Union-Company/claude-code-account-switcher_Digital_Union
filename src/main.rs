@@ -120,6 +120,20 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Start a new Claude Code cloud session in Auto mode
+    Cloud {
+        /// Account name, or "default" for ~/.claude
+        name: String,
+        /// Task for the new cloud session
+        description: String,
+    },
+    /// Pull a Claude Code cloud session into this terminal
+    Teleport {
+        /// Account name, or "default" for ~/.claude
+        name: String,
+        /// Cloud session identifier, forwarded unchanged
+        session_id: String,
+    },
     /// List Claude Code sessions across accounts
     ///
     /// Shows the current directory's sessions by default. A session lives in
@@ -328,6 +342,8 @@ fn should_show_update_hint(command: &Option<Commands>) -> bool {
             | Some(Commands::Doctor { .. })
             | Some(Commands::Update { .. })
             | Some(Commands::Run { .. })
+            | Some(Commands::Cloud { .. })
+            | Some(Commands::Teleport { .. })
             | Some(Commands::Session { .. })
     )
 }
@@ -375,6 +391,12 @@ fn main() {
             std::process::exit(commands::statusline::run(&config, &i18n, install))
         }
         Some(Commands::Run { name, args }) => commands::run::run(&config, &i18n, &name, &args),
+        Some(Commands::Cloud { name, description }) => {
+            std::process::exit(commands::cloud::run(&config, &i18n, &name, &description))
+        }
+        Some(Commands::Teleport { name, session_id }) => {
+            std::process::exit(commands::teleport::run(&config, &i18n, &name, &session_id))
+        }
         Some(Commands::Sessions { all }) => {
             std::process::exit(commands::sessions::run(&config, &i18n, all))
         }
@@ -487,6 +509,48 @@ mod tests {
             name: "work".to_string(),
             args: vec![]
         })));
+        assert!(!should_show_update_hint(&Some(Commands::Cloud {
+            name: "work".to_string(),
+            description: "task".to_string()
+        })));
+        assert!(!should_show_update_hint(&Some(Commands::Teleport {
+            name: "work".to_string(),
+            session_id: "session_123".to_string()
+        })));
+    }
+
+    #[test]
+    fn dedicated_cloud_rejects_passthrough_permission_flags() {
+        for flag in [
+            "--dangerously-skip-permissions",
+            "--allow-dangerously-skip-permissions",
+        ] {
+            let parsed = Cli::try_parse_from(["claude-acc", "cloud", "work", "task", flag]);
+            assert!(parsed.is_err(), "{flag}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "claude-acc",
+                "cloud",
+                "work",
+                "task",
+                "--permission-mode",
+                "bypassPermissions",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dedicated_commands_require_account_and_value() {
+        for argv in [
+            vec!["claude-acc", "cloud"],
+            vec!["claude-acc", "cloud", "work"],
+            vec!["claude-acc", "teleport"],
+            vec!["claude-acc", "teleport", "work"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
     }
 
     #[test]

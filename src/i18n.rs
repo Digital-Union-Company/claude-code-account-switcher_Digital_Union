@@ -89,6 +89,18 @@ impl I18n {
             (Msg::LoginNotFound(ref n), Lang::Ru) => format!("Аккаунт '{}' не найден.", n),
             (Msg::LoginStart(ref n), Lang::En) => format!("Logging in to '{}'...", n),
             (Msg::LoginStart(ref n), Lang::Ru) => format!("Вхожу в '{}'...", n),
+            (Msg::CloudDescriptionEmpty, Lang::En) => {
+                s("Cloud task description must not be empty.")
+            }
+            (Msg::CloudDescriptionEmpty, Lang::Ru) => {
+                s("Описание облачной задачи не должно быть пустым.")
+            }
+            (Msg::TeleportSessionEmpty, Lang::En) => {
+                s("Cloud session identifier must not be empty.")
+            }
+            (Msg::TeleportSessionEmpty, Lang::Ru) => {
+                s("Идентификатор облачной сессии не должен быть пустым.")
+            }
             (Msg::ClaudeNotFound, Lang::En) => s(
                 "Couldn't find `claude` on PATH. Install Claude Code, or open \
                  a new shell if you just did.",
@@ -1276,6 +1288,8 @@ pub enum Msg {
     LoginNotFound(String),
     LoginStart(String),
     LoginDone,
+    CloudDescriptionEmpty,
+    TeleportSessionEmpty,
     RemoveNotFound(String),
     RemoveConfirm(String),
     RemovePurgeConfirm(String),

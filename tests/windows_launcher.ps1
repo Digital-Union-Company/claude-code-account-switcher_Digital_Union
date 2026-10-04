@@ -166,6 +166,76 @@ try {
     Assert-True ($null -eq $default.Record.config_dir) 'default inherited CLAUDE_CONFIG_DIR'
     Assert-Equal ([IO.Path]::GetFullPath($default.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($globalAnthropicDir)) 'default did not preserve inherited ANTHROPIC_CONFIG_DIR'
 
+    $cloudTask = 'Continue Δ with "quotes", 50% & exact spacing'
+    $cloud = Invoke-Manager 'cloud-named' @('cloud', 'personal1', $cloudTask)
+    Assert-Equal $cloud.Code 0 'cloud named exit'
+    Assert-Equal $cloud.Record.argv.Count 4 'cloud argv count'
+    Assert-Equal $cloud.Record.argv[0] '--cloud' 'cloud argv[0]'
+    Assert-Equal $cloud.Record.argv[1] $cloudTask 'cloud task changed'
+    Assert-Equal $cloud.Record.argv[2] '--permission-mode' 'cloud argv[2]'
+    Assert-Equal $cloud.Record.argv[3] 'auto' 'cloud permission mode'
+    Assert-Equal ([IO.Path]::GetFullPath($cloud.Record.config_dir)) ([IO.Path]::GetFullPath($accountDir)) 'cloud named CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($cloud.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($personal1AnthropicDir)) 'cloud named ANTHROPIC_CONFIG_DIR'
+    Assert-Equal $cloud.Record.denylisted_present.Count 0 'cloud named environment scrub'
+
+    $cloudDefault = Invoke-Manager 'cloud-default' @('cloud', 'default', 'Default cloud task')
+    Assert-Equal $cloudDefault.Code 0 'cloud default exit'
+    Assert-Equal ($cloudDefault.Record.argv -join ',') '--cloud,Default cloud task,--permission-mode,auto' 'cloud default argv'
+    Assert-True ($null -eq $cloudDefault.Record.config_dir) 'cloud default CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($cloudDefault.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($globalAnthropicDir)) 'cloud default ANTHROPIC_CONFIG_DIR'
+
+    $teleport = Invoke-Manager 'teleport-named' @('teleport', 'personal1', 'session_123')
+    Assert-Equal $teleport.Code 0 'teleport named exit'
+    Assert-Equal $teleport.Record.argv.Count 2 'teleport argv count'
+    Assert-Equal $teleport.Record.argv[0] '--teleport' 'teleport argv[0]'
+    Assert-Equal $teleport.Record.argv[1] 'session_123' 'teleport session changed'
+    Assert-Equal ([IO.Path]::GetFullPath($teleport.Record.config_dir)) ([IO.Path]::GetFullPath($accountDir)) 'teleport named CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($teleport.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($personal1AnthropicDir)) 'teleport named ANTHROPIC_CONFIG_DIR'
+    Assert-Equal $teleport.Record.denylisted_present.Count 0 'teleport named environment scrub'
+
+    $teleportDefault = Invoke-Manager 'teleport-default' @('teleport', 'default', 'cse_opaque')
+    Assert-Equal $teleportDefault.Code 0 'teleport default exit'
+    Assert-Equal ($teleportDefault.Record.argv -join ',') '--teleport,cse_opaque' 'teleport default argv'
+    Assert-True ($null -eq $teleportDefault.Record.config_dir) 'teleport default CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($teleportDefault.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($globalAnthropicDir)) 'teleport default ANTHROPIC_CONFIG_DIR'
+
+    $cloudBypass = Invoke-Manager 'cloud-bypass-rejected' @('cloud', 'personal1', 'task', '--dangerously-skip-permissions')
+    Assert-Equal $cloudBypass.Code 2 'cloud bypass must fail Clap validation'
+    Assert-True ($null -eq $cloudBypass.Record) 'cloud bypass unexpectedly launched Claude'
+
+    $locatorLikeTasks = @(
+        'session_012345',
+        'cse_012345',
+        'https://claude.ai/code/session_012345',
+        'claude.ai/code/cse_012345?from=cli'
+    )
+    for ($index = 0; $index -lt $locatorLikeTasks.Count; $index++) {
+        $task = $locatorLikeTasks[$index]
+        $locatorLike = Invoke-Manager "cloud-locator-like-$index" @('cloud', 'personal1', $task) 23
+        Assert-Equal $locatorLike.Code 23 "cloud locator-like task $index child exit"
+        Assert-True ($null -ne $locatorLike.Record) "cloud locator-like task $index did not launch Claude"
+        Assert-Equal $locatorLike.Record.argv.Count 4 "cloud locator-like task $index argv count"
+        Assert-Equal $locatorLike.Record.argv[0] '--cloud' "cloud locator-like task $index argv[0]"
+        Assert-Equal $locatorLike.Record.argv[1] $task "cloud locator-like task $index changed"
+        Assert-Equal $locatorLike.Record.argv[2] '--permission-mode' "cloud locator-like task $index argv[2]"
+        Assert-Equal $locatorLike.Record.argv[3] 'auto' "cloud locator-like task $index argv[3]"
+        Assert-True (-not ($locatorLike.Record.argv -contains '-p')) "cloud locator-like task $index injected -p"
+    }
+
+    foreach ($case in @(
+        @{ Name = 'cloud-missing-account'; Args = @('cloud', 'missing', 'task') },
+        @{ Name = 'teleport-missing-account'; Args = @('teleport', 'missing', 'session_123') }
+    )) {
+        $missing = Invoke-Manager $case.Name $case.Args
+        Assert-Equal $missing.Code 1 "$($case.Name) exit"
+        Assert-True ($null -eq $missing.Record) "$($case.Name) unexpectedly launched Claude"
+    }
+
+    $cloudExit = Invoke-Manager 'cloud-exit-42' @('cloud', 'personal1', 'exit propagation') 42
+    Assert-Equal $cloudExit.Code 42 'cloud child exit propagation'
+    $teleportExit = Invoke-Manager 'teleport-exit-7' @('teleport', 'personal1', 'session_exit') 7
+    Assert-Equal $teleportExit.Code 7 'teleport child exit propagation'
+
     $quoteArgs = @('run', 'personal1', 'a"b', '50%literal', 'a&b', 'C:\tail\')
     $quotes = Invoke-Manager 'quote-relevant' $quoteArgs
     Assert-Equal $quotes.Code 0 'native quote-relevant arguments'
