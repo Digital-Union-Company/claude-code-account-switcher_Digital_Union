@@ -115,8 +115,14 @@ try {
     $tokens = $null
     $parseErrors = $null
     [System.Management.Automation.Language.Parser]::ParseInput($activateOutput, [ref]$tokens, [ref]$parseErrors) | Out-Null
-    Assert-Equal $parseErrors.Count 0 'PowerShell activation with apostrophe path must parse'
-    Assert-True $activateOutput.Contains("O''Brien") 'PowerShell activation did not escape apostrophe path'
+    Assert-Equal $parseErrors.Count 0 'PowerShell activation output must parse'
+    # AppConfig intentionally retains the logical ~/.claude-switch junction
+    # path; resolving its apostrophe-bearing target would be R3B path
+    # normalization. The Rust activation unit test supplies an apostrophe in
+    # the account path directly. Here, prove the end-to-end command emits the
+    # exact logical account assignment and remains valid PowerShell.
+    $expectedActivationPath = (Join-Path $managerLink 'accounts\personal1').Replace("'", "''")
+    Assert-True $activateOutput.Contains("'$expectedActivationPath'") 'PowerShell activation emitted the wrong account path'
 
     foreach ($name in $denylist) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
