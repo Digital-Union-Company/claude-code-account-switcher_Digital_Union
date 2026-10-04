@@ -11,14 +11,14 @@
 
 ### Bug Fixes
 
-* let a missing argument reach the usage message instead of killing the shell ([#148](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/148)) ([a34120d](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/a34120d2db7c8746771f7a6abd09e7f007fd15f9))
+* let a missing argument reach the usage message instead of killing the shell ([#148](https://github.com/Nemo-Illusionist/claude-code-account-switcher/pull/148)) ([a34120d](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/a34120d2db7c8746771f7a6abd09e7f007fd15f9))
 * normalize Windows directory link identity ([#4](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/4)) ([491b272](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/491b2728f96cc1df7a69b5abbf4a67e420b88297))
 * secure Windows Claude launch substrate ([#1](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/1)) ([40f00ee](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/40f00ee49cab548b04a30e948205a75cd3d020a7))
 
 
 ### Documentation
 
-* say that the status line meter is the context window, not the quota ([#146](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/146)) ([f85378f](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/f85378fec9a3a8a5d9de3721affae269cabf4d91))
+* say that the status line meter is the context window, not the quota ([#146](https://github.com/Nemo-Illusionist/claude-code-account-switcher/pull/146)) ([f85378f](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/f85378fec9a3a8a5d9de3721affae269cabf4d91))
 
 ## [0.20.0](https://github.com/Nemo-Illusionist/claude-code-account-switcher/compare/v0.19.0...v0.20.0) (2026-10-01)
 
