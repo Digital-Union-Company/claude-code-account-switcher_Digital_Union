@@ -49,8 +49,10 @@ pub fn resolve_claude(
 
     match extension.as_str() {
         "exe" | "com" => Some(ResolvedClaude::Native(executable)),
-        "cmd" | "bat" => recognize_npm_installation(&executable, path, excluded_dir)
-            .unwrap_or(ResolvedClaude::Batch(executable)),
+        "cmd" | "bat" => Some(
+            recognize_npm_installation(&executable, path, excluded_dir)
+                .unwrap_or(ResolvedClaude::Batch(executable)),
+        ),
         _ => None,
     }
 }
