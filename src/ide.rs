@@ -94,10 +94,11 @@ pub fn install_wrapper(
 
 /// Native Windows uses an `.exe`; Unix keeps the existing shell wrapper name.
 pub fn wrapper_path(config: &AppConfig) -> PathBuf {
-    config
-        .base_dir
-        .join("bin")
-        .join(if cfg!(windows) { "claude.exe" } else { "claude" })
+    config.base_dir.join("bin").join(if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    })
 }
 
 #[cfg(windows)]
@@ -204,10 +205,8 @@ mod windows_tests {
     use std::os::windows::fs::OpenOptionsExt;
 
     fn scratch(tag: &str) -> (PathBuf, AppConfig) {
-        let root = std::env::temp_dir().join(format!(
-            "cc-shim-install-{tag}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("cc-shim-install-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let config = AppConfig {
             base_dir: root.join("manager"),

@@ -178,9 +178,7 @@ fn update_shell_profile(rc: &Path, eval_line: &str) -> std::io::Result<ShellProf
         .lines()
         .filter(|line| is_claude_acc_init_line(line))
         .count();
-    let has_exact_match = content
-        .lines()
-        .any(|line| line.trim() == eval_line.trim());
+    let has_exact_match = content.lines().any(|line| line.trim() == eval_line.trim());
     if init_line_count == 1 && has_exact_match {
         return Ok(ShellProfileChange::AlreadyCurrent);
     }
@@ -359,10 +357,7 @@ mod tests {
         let literal = crate::powershell::single_quoted_literal(
             r"C:\Users\O'Brien\.claude-switch\bin\claude-acc.exe",
         );
-        let line = format!(
-            "Invoke-Expression ((& {} init pwsh) -join \"`n\")",
-            literal
-        );
+        let line = format!("Invoke-Expression ((& {} init pwsh) -join \"`n\")", literal);
         assert_eq!(
             line,
             r#"Invoke-Expression ((& 'C:\Users\O''Brien\.claude-switch\bin\claude-acc.exe' init pwsh) -join "`n")"#
@@ -371,10 +366,8 @@ mod tests {
 
     #[test]
     fn invalid_utf8_profile_is_never_replaced() {
-        let root = std::env::temp_dir().join(format!(
-            "cc-install-invalid-profile-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("cc-install-invalid-profile-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let profile = root.join("Microsoft.PowerShell_profile.ps1");
@@ -403,10 +396,8 @@ mod tests {
 
     #[test]
     fn missing_and_existing_utf8_profiles_follow_explicit_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "cc-install-profile-update-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("cc-install-profile-update-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let profile = root.join("nested/profile.ps1");
         let line = "Invoke-Expression ((& 'C:\\bin\\claude-acc.exe' init pwsh) -join \"`n\")";
@@ -419,7 +410,10 @@ mod tests {
             update_shell_profile(&profile, line).unwrap(),
             ShellProfileChange::AlreadyCurrent
         );
-        assert_eq!(fs::read_to_string(&profile).unwrap().matches(line).count(), 1);
+        assert_eq!(
+            fs::read_to_string(&profile).unwrap().matches(line).count(),
+            1
+        );
         let _ = fs::remove_dir_all(root);
     }
 

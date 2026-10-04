@@ -1138,12 +1138,12 @@ impl I18n {
                  convention. The PATH-based claude.exe shim and terminal mode \
                  work there, but native UI wiring remains deferred.",
             ),
-            (Msg::VscodeWindowsUnsupported, Lang::Ru) => s(
-                "Пока не на Windows: нативный UI передаёт свой встроенный \
+            (Msg::VscodeWindowsUnsupported, Lang::Ru) => {
+                s("Пока не на Windows: нативный UI передаёт свой встроенный \
                  бинарник Claude process-wrapper'у по отдельному протоколу. \
                  PATH-шима claude.exe и терминальный режим уже работают, но \
-                 подключение нативного UI пока отложено.",
-            ),
+                 подключение нативного UI пока отложено.")
+            }
             (Msg::VscodeNoEditors, Lang::En) => {
                 s("No VS Code, VS Code Insiders, VSCodium or Cursor found on this machine.")
             }

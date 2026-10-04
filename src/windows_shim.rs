@@ -3,10 +3,10 @@
 //! The shim makes only routing decisions. `ClaudeProcess` remains the single
 //! executable resolver, environment boundary, spawn path, and exit-code path.
 
-#[cfg(windows)]
-use crate::claude_process::{ClaudeProcess, LaunchError};
 #[cfg(any(windows, test))]
 use crate::claude_process::ClaudeProfile;
+#[cfg(windows)]
+use crate::claude_process::{ClaudeProcess, LaunchError};
 #[cfg(any(windows, test))]
 use crate::config::AppConfig;
 #[cfg(any(windows, test))]
@@ -173,10 +173,8 @@ mod tests {
     use std::fs;
 
     fn scratch(tag: &str) -> (PathBuf, AppConfig) {
-        let root = std::env::temp_dir().join(format!(
-            "cc-windows-shim-{tag}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("cc-windows-shim-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let config = AppConfig {
             base_dir: root.join("manager"),
