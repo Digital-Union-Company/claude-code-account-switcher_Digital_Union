@@ -22,7 +22,7 @@
 
 ### Rust CLI (рекомендуется)
 
-Скачайте из [GitHub Releases](https://github.com/Nemo-Illusionist/claude-code-account-switcher/releases), затем:
+Скачайте из [GitHub Releases](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/releases), затем:
 
 ```bash
 claude-acc install

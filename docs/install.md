@@ -104,7 +104,7 @@ Both versions read and write the same files under `~/.claude-switch/`:
 So you can move from one to the other without re-creating accounts or relinking directories. Steps:
 
 **Shell → Rust:**
-1. Install the Rust binary: download from [Releases](https://github.com/Nemo-Illusionist/claude-code-account-switcher/releases) and run `claude-acc install`. The Rust install command writes its own shell-init line.
+1. Install the Rust binary: download from [Releases](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/releases) and run `claude-acc install`. The Rust install command writes its own shell-init line.
 2. Remove the `source ~/.claude-switch.sh` line from your `~/.zshrc` (the Rust init handles activation now).
 3. Optionally `rm ~/.claude-switch.sh`.
 
