@@ -166,12 +166,12 @@ mod tests {
         fs::create_dir_all(config.account_path("personal1")).unwrap();
 
         assert_eq!(
-            profile_for_account(&config, "personal1").unwrap(),
-            ClaudeProfile::Named(config.account_path("personal1"))
+            profile_for_account(&config, "personal1").ok(),
+            Some(ClaudeProfile::Named(config.account_path("personal1")))
         );
         assert_eq!(
-            profile_for_account(&config, "default").unwrap(),
-            ClaudeProfile::Default
+            profile_for_account(&config, "default").ok(),
+            Some(ClaudeProfile::Default)
         );
         assert!(matches!(
             profile_for_account(&config, "bad/name"),
