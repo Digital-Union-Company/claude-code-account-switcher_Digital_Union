@@ -30,6 +30,19 @@ the secure-storage redirect are removed before Claude starts. Generic cloud
 environment such as `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
 `GOOGLE_APPLICATION_CREDENTIALS`, and `AZURE_CLIENT_ID` is left alone.
 
+For a named account, the manager also sets `ANTHROPIC_CONFIG_DIR` to
+`~/.claude-switch/accounts/<name>/.anthropic`. This prevents an inherited
+`ANTHROPIC_CONFIG_DIR` or the global Anthropic `active_config` profile from
+changing that account's effective identity under Anthropic's documented
+[profile resolution order](https://platform.claude.com/docs/en/manage-claude/wif-reference#configuration-directory).
+The manager does not read, copy, or migrate the global Anthropic profile
+directory.
+
+The `default` account intentionally behaves differently: it leaves
+`ANTHROPIC_CONFIG_DIR` untouched, preserving Claude's normal upstream profile
+resolution through an inherited value or the platform-global Anthropic
+configuration directory.
+
 Settings inside the selected account still belong to Claude Code. In
 particular, an account's own `settings.json` may intentionally select a cloud
 provider or use `apiKeyHelper`; the manager does not parse or rewrite it.

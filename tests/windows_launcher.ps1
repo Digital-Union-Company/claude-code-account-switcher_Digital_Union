@@ -35,10 +35,14 @@ $captureDir = Join-Path $root 'captures'
 $managerTarget = Join-Path $homeDir '.claude-switch'
 $claudeTarget = Join-Path $homeDir '.claude'
 $accountTarget = Join-Path $managerTarget 'accounts\personal1'
+$account2Target = Join-Path $managerTarget 'accounts\personal2'
 $profileRoot = [Environment]::GetFolderPath('UserProfile')
 $managerLink = Join-Path $profileRoot '.claude-switch'
 $claudeLink = Join-Path $profileRoot '.claude'
 $accountDir = Join-Path $managerLink 'accounts\personal1'
+$account2Dir = Join-Path $managerLink 'accounts\personal2'
+$globalAnthropicDir = Join-Path $root 'global Anthropic profile Ω'
+$globalAnthropicCredentials = Join-Path $globalAnthropicDir 'credentials'
 
 $fixture = Join-Path $PSScriptRoot 'fixtures\fake_claude.rs'
 $fakeClaude = Join-Path $trustedBin 'claude.exe'
@@ -68,11 +72,13 @@ $denylist = @(
     'CLAUDE_SECURESTORAGE_CONFIG_DIR'
 )
 $secretSentinel = 'R1_SECRET_VALUE_MUST_NEVER_BE_CAPTURED_7f93'
+$profileSecretSentinel = 'R1_PROFILE_SECRET_MUST_NEVER_BE_CAPTURED_81ab'
 $savedEnvironment = @{}
 $savedPath = $env:PATH
 $savedPathExt = $env:PATHEXT
 $savedComSpec = $env:ComSpec
 $savedConfig = $env:CLAUDE_CONFIG_DIR
+$savedAnthropicConfig = $env:ANTHROPIC_CONFIG_DIR
 $environmentSaved = $false
 
 try {
@@ -80,9 +86,11 @@ try {
     if ((Test-Path -LiteralPath $managerLink) -or (Test-Path -LiteralPath $claudeLink)) {
         throw 'Refusing to touch an existing real ~/.claude-switch or ~/.claude directory.'
     }
-    New-Item -ItemType Directory -Force -Path $homeDir, $trustedBin, $workingDir, $captureDir, $accountTarget, $claudeTarget, $decoyShellDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $homeDir, $trustedBin, $workingDir, $captureDir, $accountTarget, $account2Target, $claudeTarget, $decoyShellDir, $globalAnthropicDir, $globalAnthropicCredentials | Out-Null
     New-Item -ItemType Junction -Path $managerLink -Target $managerTarget | Out-Null
     New-Item -ItemType Junction -Path $claudeLink -Target $claudeTarget | Out-Null
+    Set-Content -LiteralPath (Join-Path $globalAnthropicDir 'active_config') -Value 'global-federated-profile' -Encoding Ascii
+    Set-Content -LiteralPath (Join-Path $globalAnthropicCredentials 'global-federated-profile.json') -Value $profileSecretSentinel -Encoding Ascii
 
     & rustc $fixture '-o' $fakeClaude
     Assert-Equal $LASTEXITCODE 0 'fake Claude compilation'
@@ -102,6 +110,7 @@ try {
     $env:PATHEXT = '.EXE;.COM;.CMD;.BAT'
     $env:ComSpec = $decoyShell
     $env:CLAUDE_CONFIG_DIR = (Join-Path $root 'inherited wrong profile')
+    $env:ANTHROPIC_CONFIG_DIR = $globalAnthropicDir
 
     function Invoke-Manager {
         param([string]$Name, [string[]]$Arguments, [int]$ChildExit = 0)
@@ -120,6 +129,7 @@ try {
         if (Test-Path -LiteralPath $capture) {
             $raw = Get-Content -LiteralPath $capture -Raw
             Assert-True (-not $raw.Contains($secretSentinel)) "$Name capture leaked a secret value"
+            Assert-True (-not $raw.Contains($profileSecretSentinel)) "$Name capture leaked Anthropic profile credential content"
             $record = $raw | ConvertFrom-Json
         }
         [pscustomobject]@{ Code = $code; Record = $record; Capture = $capture }
@@ -133,8 +143,18 @@ try {
     Assert-Equal $ordinary.Record.argv[1] 'b c' 'argv[1]'
     Assert-Equal $ordinary.Record.argv[2] '--flag=value' 'argv[2]'
     Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.config_dir)) ([IO.Path]::GetFullPath($accountDir)) 'named CLAUDE_CONFIG_DIR'
+    $personal1AnthropicDir = Join-Path $accountDir '.anthropic'
+    Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($personal1AnthropicDir)) 'personal1 ANTHROPIC_CONFIG_DIR'
+    Assert-True ([IO.Path]::GetFullPath($ordinary.Record.anthropic_config_dir) -ne [IO.Path]::GetFullPath($globalAnthropicDir)) 'personal1 inherited global ANTHROPIC_CONFIG_DIR'
     Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.cwd)) ([IO.Path]::GetFullPath($workingDir)) 'child cwd'
     Assert-Equal $ordinary.Record.denylisted_present.Count 0 'denylisted variables reached child'
+
+    $second = Invoke-Manager 'second-account' @('run', 'personal2')
+    Assert-Equal $second.Code 0 'second named profile exit'
+    Assert-Equal ([IO.Path]::GetFullPath($second.Record.config_dir)) ([IO.Path]::GetFullPath($account2Dir)) 'personal2 CLAUDE_CONFIG_DIR'
+    $personal2AnthropicDir = Join-Path $account2Dir '.anthropic'
+    Assert-Equal ([IO.Path]::GetFullPath($second.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($personal2AnthropicDir)) 'personal2 ANTHROPIC_CONFIG_DIR'
+    Assert-True ([IO.Path]::GetFullPath($second.Record.anthropic_config_dir) -ne [IO.Path]::GetFullPath($ordinary.Record.anthropic_config_dir)) 'named accounts shared ANTHROPIC_CONFIG_DIR'
 
     $bypass = Invoke-Manager 'bypass' @('run', 'personal1', '--dangerously-skip-permissions')
     Assert-Equal $bypass.Code 0 'local bypass passthrough exit'
@@ -144,6 +164,7 @@ try {
     $default = Invoke-Manager 'default' @('run', 'default')
     Assert-Equal $default.Code 0 'default profile exit'
     Assert-True ($null -eq $default.Record.config_dir) 'default inherited CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($default.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($globalAnthropicDir)) 'default did not preserve inherited ANTHROPIC_CONFIG_DIR'
 
     $quoteArgs = @('run', 'personal1', 'a"b', '50%literal', 'a&b', 'C:\tail\')
     $quotes = Invoke-Manager 'quote-relevant' $quoteArgs
@@ -162,11 +183,13 @@ try {
     Assert-Equal $add.Code 0 'add through fake Claude'
     Assert-Equal ($add.Record.argv -join ',') 'auth,login' 'add login argv'
     Assert-True $add.Record.config_dir.EndsWith('added-by-fake') 'add config directory'
+    Assert-Equal ([IO.Path]::GetFullPath($add.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath((Join-Path $add.Record.config_dir '.anthropic'))) 'add ANTHROPIC_CONFIG_DIR'
     Assert-Equal $add.Record.denylisted_present.Count 0 'add environment scrub'
 
     $login = Invoke-Manager 'login' @('login', 'personal1')
     Assert-Equal $login.Code 0 'login through fake Claude'
     Assert-Equal ($login.Record.argv -join ',') 'auth,login' 'login argv'
+    Assert-Equal ([IO.Path]::GetFullPath($login.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath($personal1AnthropicDir)) 'login ANTHROPIC_CONFIG_DIR'
     Assert-Equal $login.Record.denylisted_present.Count 0 'login environment scrub'
 
     Remove-Item -LiteralPath $fakeClaude -Force
@@ -185,6 +208,7 @@ try {
         $env:PATHEXT = $savedPathExt
         $env:ComSpec = $savedComSpec
         $env:CLAUDE_CONFIG_DIR = $savedConfig
+        $env:ANTHROPIC_CONFIG_DIR = $savedAnthropicConfig
         Remove-Item Env:CLAUDE_ACC_TEST_CAPTURE -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDE_ACC_TEST_EXIT_CODE -ErrorAction SilentlyContinue
         foreach ($name in $denylist) {

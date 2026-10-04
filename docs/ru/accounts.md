@@ -30,6 +30,18 @@ Vertex, Foundry, Anthropic AWS/Mantle), селекторы Anthropic profile/fed
 облаков, например `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
 `GOOGLE_APPLICATION_CREDENTIALS` и `AZURE_CLIENT_ID`, остаются без изменений.
 
+Для именованного аккаунта менеджер также задаёт `ANTHROPIC_CONFIG_DIR` как
+`~/.claude-switch/accounts/<name>/.anthropic`. Так унаследованный
+`ANTHROPIC_CONFIG_DIR` или глобальный Anthropic-профиль `active_config` не
+могут изменить фактическую identity этого аккаунта согласно документированному
+[порядку разрешения профилей](https://platform.claude.com/docs/en/manage-claude/wif-reference#configuration-directory).
+Менеджер не читает, не копирует и не переносит глобальную директорию
+Anthropic-профилей.
+
+Аккаунт `default` намеренно работает иначе: он не изменяет
+`ANTHROPIC_CONFIG_DIR`, сохраняя обычное upstream-разрешение профиля Claude
+через унаследованное значение или глобальную директорию Anthropic для платформы.
+
 Настройки внутри выбранного аккаунта по-прежнему принадлежат Claude Code. В
 частности, собственный `settings.json` аккаунта может намеренно выбрать
 облачного провайдера или использовать `apiKeyHelper`; менеджер его не разбирает

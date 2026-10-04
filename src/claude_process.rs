@@ -111,17 +111,20 @@ impl ClaudeProcess {
             ResolvedClaude::Batch(script) => self.batch_command(&script)?,
         };
 
+        strip_claude_auth_env(&mut command);
         match &self.profile {
             ClaudeProfile::Named(config_dir) => {
                 command.env("CLAUDE_CONFIG_DIR", config_dir);
+                command.env("ANTHROPIC_CONFIG_DIR", config_dir.join(".anthropic"));
                 command.env_remove("CLAUDE_ACC_RUN_DEFAULT");
             }
             ClaudeProfile::Default => {
                 command.env_remove("CLAUDE_CONFIG_DIR");
+                // Deliberately inherit ANTHROPIC_CONFIG_DIR so the standard
+                // account keeps upstream Anthropic profile resolution.
                 command.env("CLAUDE_ACC_RUN_DEFAULT", "1");
             }
         }
-        strip_claude_auth_env(&mut command);
         command.current_dir(&self.cwd);
         Ok(command)
     }
@@ -241,10 +244,46 @@ mod tests {
             env(&command, "CLAUDE_CONFIG_DIR"),
             Some(Some(OsStr::new("account path")))
         );
+        let anthropic_config = PathBuf::from("account path").join(".anthropic");
+        assert_eq!(
+            env(&command, "ANTHROPIC_CONFIG_DIR"),
+            Some(Some(anthropic_config.as_os_str()))
+        );
         assert_eq!(env(&command, "CLAUDE_ACC_RUN_DEFAULT"), Some(None));
         for variable in CLAUDE_AUTH_ENV_VARS {
             assert_eq!(env(&command, variable), Some(None), "{variable}");
         }
+    }
+
+    #[test]
+    fn named_profiles_use_distinct_account_local_anthropic_directories() {
+        let first = process(
+            &[],
+            ClaudeProfile::Named(PathBuf::from("accounts").join("personal1")),
+        )
+        .command_for_resolved(ResolvedClaude::Native(PathBuf::from("claude.exe")))
+        .unwrap();
+        let second = process(
+            &[],
+            ClaudeProfile::Named(PathBuf::from("accounts").join("personal2")),
+        )
+        .command_for_resolved(ResolvedClaude::Native(PathBuf::from("claude.exe")))
+        .unwrap();
+        let first_dir = PathBuf::from("accounts")
+            .join("personal1")
+            .join(".anthropic");
+        let second_dir = PathBuf::from("accounts")
+            .join("personal2")
+            .join(".anthropic");
+        assert_eq!(
+            env(&first, "ANTHROPIC_CONFIG_DIR"),
+            Some(Some(first_dir.as_os_str()))
+        );
+        assert_eq!(
+            env(&second, "ANTHROPIC_CONFIG_DIR"),
+            Some(Some(second_dir.as_os_str()))
+        );
+        assert_ne!(first_dir, second_dir);
     }
 
     #[test]
@@ -254,6 +293,11 @@ mod tests {
             .command_for_resolved(ResolvedClaude::Native(PathBuf::from("claude.exe")))
             .unwrap();
         assert_eq!(env(&command, "CLAUDE_CONFIG_DIR"), Some(None));
+        assert_eq!(
+            env(&command, "ANTHROPIC_CONFIG_DIR"),
+            None,
+            "default must inherit upstream Anthropic profile resolution"
+        );
         assert_eq!(
             env(&command, "CLAUDE_ACC_RUN_DEFAULT"),
             Some(Some(OsStr::new("1")))

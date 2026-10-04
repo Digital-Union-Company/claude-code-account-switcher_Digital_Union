@@ -60,6 +60,8 @@ fn main() {
         .collect();
     let config_dir = env::var_os("CLAUDE_CONFIG_DIR")
         .map(|value| value.to_string_lossy().into_owned());
+    let anthropic_config_dir = env::var_os("ANTHROPIC_CONFIG_DIR")
+        .map(|value| value.to_string_lossy().into_owned());
     let cwd = env::current_dir()
         .expect("current directory")
         .to_string_lossy()
@@ -73,9 +75,13 @@ fn main() {
     // Credential values are never read. The capture contains names only for
     // any denylisted variables that unexpectedly survived.
     let json = format!(
-        "{{\"argv\":{},\"config_dir\":{},\"cwd\":{},\"denylisted_present\":{}}}",
+        "{{\"argv\":{},\"config_dir\":{},\"anthropic_config_dir\":{},\"cwd\":{},\"denylisted_present\":{}}}",
         json_array(args.iter().map(String::as_str)),
         config_dir
+            .as_deref()
+            .map(json_string)
+            .unwrap_or_else(|| "null".to_string()),
+        anthropic_config_dir
             .as_deref()
             .map(json_string)
             .unwrap_or_else(|| "null".to_string()),

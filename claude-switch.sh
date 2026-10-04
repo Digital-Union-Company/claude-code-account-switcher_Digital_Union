@@ -697,7 +697,8 @@ _claude_acc_add() {
     # OAuth flow entirely, or auth a different identity than acc_dir intends.
     (
         _claude_acc_scrub_auth_env
-        CLAUDE_CONFIG_DIR="$acc_dir" claude auth login
+        CLAUDE_CONFIG_DIR="$acc_dir" \
+            ANTHROPIC_CONFIG_DIR="$acc_dir/.anthropic" claude auth login
     )
     # Record which account this directory now belongs to, so a later
     # re-login as somebody else is reported rather than silently
@@ -745,9 +746,9 @@ _claude_acc_login() {
     # A leaked ANTHROPIC_API_KEY etc. can make `claude auth login` skip the
     # OAuth flow entirely, or auth a different identity than acc_dir intends.
     (
-        unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
-            CLAUDE_CODE_OAUTH_TOKEN AWS_BEARER_TOKEN_BEDROCK
-        CLAUDE_CONFIG_DIR="$acc_dir" claude auth login
+        _claude_acc_scrub_auth_env
+        CLAUDE_CONFIG_DIR="$acc_dir" \
+            ANTHROPIC_CONFIG_DIR="$acc_dir/.anthropic" claude auth login
     )
     # Pins only if this account has none yet: re-logging in to a pinned
     # account must not move the pin, since that swap is the drift it reports.
@@ -1174,7 +1175,8 @@ _claude_acc_run() {
 
     (
         _claude_acc_scrub_auth_env
-        CLAUDE_CONFIG_DIR="$acc_dir" command claude "$@"
+        CLAUDE_CONFIG_DIR="$acc_dir" \
+            ANTHROPIC_CONFIG_DIR="$acc_dir/.anthropic" command claude "$@"
     )
 }
 
