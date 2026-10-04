@@ -20,6 +20,45 @@
 
 Каждый аккаунт получает свою копию всех этих файлов в `~/.claude-switch/accounts/<name>/`.
 
+### Безопасная граница запуска
+
+`run`, `add` и `login` запускают Claude одним и тем же способом. Выбранный
+`CLAUDE_CONFIG_DIR` имеет приоритет: перед запуском удаляются унаследованные
+Claude-specific API-ключи, OAuth-параметры, переключатели провайдера (Bedrock,
+Vertex, Foundry, Anthropic AWS/Mantle), селекторы Anthropic profile/federation,
+переопределения endpoint и перенаправление secure storage. Общие переменные
+облаков, например `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
+`GOOGLE_APPLICATION_CREDENTIALS` и `AZURE_CLIENT_ID`, остаются без изменений.
+
+Для именованного аккаунта менеджер также задаёт `ANTHROPIC_CONFIG_DIR` как
+`~/.claude-switch/accounts/<name>/.anthropic`. Так унаследованный
+`ANTHROPIC_CONFIG_DIR` или глобальный Anthropic-профиль `active_config` не
+могут изменить фактическую identity этого аккаунта согласно документированному
+[порядку разрешения профилей](https://platform.claude.com/docs/en/manage-claude/wif-reference#configuration-directory).
+Менеджер не читает, не копирует и не переносит глобальную директорию
+Anthropic-профилей.
+
+Аккаунт `default` намеренно работает иначе: он не изменяет
+`ANTHROPIC_CONFIG_DIR`, сохраняя обычное upstream-разрешение профиля Claude
+через унаследованное значение или глобальную директорию Anthropic для платформы.
+
+Настройки внутри выбранного аккаунта по-прежнему принадлежат Claude Code. В
+частности, собственный `settings.json` аккаунта может намеренно выбрать
+облачного провайдера или использовать `apiKeyHelper`; менеджер его не разбирает
+и не переписывает.
+
+В Windows обычный файл credentials находится в
+`%USERPROFILE%\.claude\.credentials.json`, а с `CLAUDE_CONFIG_DIR` — в
+`<CLAUDE_CONFIG_DIR>\.credentials.json`. При запуске менеджер не читает, не
+копирует и не переносит этот файл.
+
+В Windows `claude` ровно один раз разрешается по абсолютным элементам `PATH`;
+текущий репозиторий первым не просматривается. Нативные `.exe` и `.com`
+запускаются напрямую. Для распознанной npm-структуры конкретный `cli.js`
+запускается напрямую через Node; неизвестный `.cmd` или `.bat` остаётся
+ограниченным compatibility fallback и явно отклоняет аргументы, которые нельзя
+безопасно представить для shell.
+
 ### Дефолтная модель на аккаунт
 
 Поскольку у каждого аккаунта свой `settings.json`, дефолтная модель на аккаунт работает «из коробки» — без отдельного флага или конфига. Пропишите ключ [`model`](https://code.claude.com/docs/en/settings) Claude Code в settings.json нужного аккаунта:

@@ -1,43 +1,22 @@
+use crate::claude_process::{ClaudeProcess, ClaudeProfile, current_dir, manager_bin_dir};
 use crate::config::{AppConfig, validate_name};
-use crate::environment::strip_claude_auth_env;
 use crate::i18n::{I18n, Msg};
 use crate::sessions;
-use crate::windows_invocation::{InvocationError, claude_command};
 use std::path::Path;
-use std::process::Command;
 
-/// Builds the `claude` invocation for `run`. For the "default" account this
-/// must strip any inherited `CLAUDE_CONFIG_DIR` (e.g. exported by the shell's
-/// directory-link hook) so `claude-acc run default` really runs the standard
-/// ~/.claude/ account rather than whatever the current directory is linked to.
-///
-/// `claude` on PATH usually resolves to claude-acc's own IDE wrapper
-/// (~/.claude-switch/bin/claude, see src/ide.rs), which re-derives
-/// CLAUDE_CONFIG_DIR from $PWD whenever it finds the var unset — that would
-/// silently undo the "default" request in a linked directory. CLAUDE_ACC_RUN_DEFAULT
-/// tells the wrapper this is an explicit default run so it skips that step.
-///
-/// Also strips ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN /
-/// AWS_BEARER_TOKEN_BEDROCK — any of these leaking in from the parent shell can
-/// override which identity claude actually uses, regardless of CLAUDE_CONFIG_DIR.
-///
-/// On Windows, `claude` is spawned through the hardened invocation in
-/// windows_invocation.rs — see its module doc for why a plain
-/// `Command::new("claude").args(args)` isn't safe there.
-fn build_command(args: &[String], acc_dir: Option<&Path>) -> Result<Command, InvocationError> {
-    let mut cmd = claude_command(args)?;
-    match acc_dir {
-        Some(dir) => {
-            cmd.env("CLAUDE_CONFIG_DIR", dir);
-            cmd.env_remove("CLAUDE_ACC_RUN_DEFAULT");
-        }
-        None => {
-            cmd.env_remove("CLAUDE_CONFIG_DIR");
-            cmd.env("CLAUDE_ACC_RUN_DEFAULT", "1");
-        }
-    }
-    strip_claude_auth_env(&mut cmd);
-    Ok(cmd)
+/// Build the structured Claude launch plan for `run`. The explicit default
+/// marker preserves the existing IDE-wrapper contract while the central
+/// launcher makes CLAUDE_CONFIG_DIR and the authentication scrub authoritative.
+fn build_process(config: &AppConfig, args: &[String], acc_dir: Option<&Path>) -> ClaudeProcess {
+    let profile = acc_dir
+        .map(|dir| ClaudeProfile::Named(dir.to_path_buf()))
+        .unwrap_or(ClaudeProfile::Default);
+    ClaudeProcess::new(
+        args.iter().map(String::as_str),
+        profile,
+        current_dir(),
+        manager_bin_dir(&config.base_dir),
+    )
 }
 
 pub fn run(config: &AppConfig, i18n: &I18n, name: &str, args: &[String]) {
@@ -46,7 +25,7 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, args: &[String]) {
         if let Some(dir) = dir.as_deref() {
             super::session::preflight_resume(config, i18n, args, sessions::DEFAULT_LABEL, dir);
         }
-        std::process::exit(super::spawn_claude(build_command(args, None), i18n));
+        std::process::exit(super::spawn_claude(build_process(config, args, None), i18n));
     }
 
     if !validate_name(name) {
@@ -62,7 +41,7 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, args: &[String]) {
     let acc_dir = config.account_path(name);
     super::session::preflight_resume(config, i18n, args, name, &acc_dir);
     std::process::exit(super::spawn_claude(
-        build_command(args, Some(&acc_dir)),
+        build_process(config, args, Some(&acc_dir)),
         i18n,
     ));
 }
@@ -70,96 +49,46 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
 
-    #[test]
-    fn default_account_strips_inherited_config_dir() {
-        // Simulate the shell hook having exported CLAUDE_CONFIG_DIR for a
-        // linked directory before `claude-acc run default` is invoked.
-        unsafe {
-            std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/some-linked-account");
+    fn config() -> AppConfig {
+        AppConfig {
+            base_dir: PathBuf::from("manager root"),
         }
+    }
 
-        let cmd = build_command(&[], None).unwrap();
-        let removed = cmd
-            .get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"));
+    #[test]
+    fn default_account_builds_default_profile() {
+        let process = build_process(&config(), &[], None);
+        assert_eq!(process.profile(), &ClaudeProfile::Default);
+    }
 
-        unsafe {
-            std::env::remove_var("CLAUDE_CONFIG_DIR");
-        }
-
-        // env_remove() records the key with a `None` value so the child
-        // process never sees it, regardless of what the parent inherited.
+    #[test]
+    fn named_account_builds_exact_config_profile() {
+        let dir = Path::new("account path");
+        let process = build_process(&config(), &[], Some(dir));
         assert_eq!(
-            removed,
-            Some((std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"), None))
+            process.profile(),
+            &ClaudeProfile::Named(PathBuf::from("account path"))
         );
     }
 
     #[test]
-    fn default_account_marks_run_default_for_the_ide_wrapper() {
-        // The `claude` on PATH is usually claude-acc's own IDE wrapper,
-        // which re-derives CLAUDE_CONFIG_DIR from $PWD when it sees the var
-        // unset. This marker tells it to skip that for an explicit default run.
-        let cmd = build_command(&[], None).unwrap();
-        let marker = cmd
-            .get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_ACC_RUN_DEFAULT"));
-
+    fn every_claude_argument_is_preserved_in_order() {
+        let args = vec![
+            "a".to_string(),
+            "b c".to_string(),
+            "--flag=value".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            "quote\"relevant%content&".to_string(),
+        ];
+        let process = build_process(&config(), &args, None);
         assert_eq!(
-            marker,
-            Some((
-                std::ffi::OsStr::new("CLAUDE_ACC_RUN_DEFAULT"),
-                Some(std::ffi::OsStr::new("1"))
-            ))
+            process.argv(),
+            args.iter()
+                .map(|arg| OsStr::new(arg.as_str()))
+                .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn named_account_sets_config_dir() {
-        let dir = Path::new("/tmp/some-account");
-        let cmd = build_command(&[], Some(dir)).unwrap();
-        let set = cmd
-            .get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"));
-
-        assert_eq!(
-            set,
-            Some((
-                std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"),
-                Some(std::ffi::OsStr::new("/tmp/some-account"))
-            ))
-        );
-    }
-
-    #[test]
-    fn named_account_clears_run_default_marker() {
-        let dir = Path::new("/tmp/some-account");
-        let cmd = build_command(&[], Some(dir)).unwrap();
-        let marker = cmd
-            .get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_ACC_RUN_DEFAULT"));
-
-        assert_eq!(
-            marker,
-            Some((std::ffi::OsStr::new("CLAUDE_ACC_RUN_DEFAULT"), None))
-        );
-    }
-
-    #[test]
-    fn strips_auth_env_vars_that_could_override_the_selected_account() {
-        for acc_dir in [None, Some(Path::new("/tmp/some-account"))] {
-            let cmd = build_command(&[], acc_dir).unwrap();
-            for var in crate::environment::CLAUDE_AUTH_ENV_VARS {
-                let removed = cmd
-                    .get_envs()
-                    .find(|(k, _)| *k == std::ffi::OsStr::new(*var));
-                assert_eq!(
-                    removed,
-                    Some((std::ffi::OsStr::new(*var), None)),
-                    "{var} not stripped for acc_dir={acc_dir:?}"
-                );
-            }
-        }
     }
 }

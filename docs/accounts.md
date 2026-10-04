@@ -20,6 +20,44 @@ how to adopt a config directory you already have.
 
 Each account gets its own copy of all these files in `~/.claude-switch/accounts/<name>/`.
 
+### Secure launch boundary
+
+`run`, `add`, and `login` all start Claude through the same launch path. The
+selected `CLAUDE_CONFIG_DIR` is authoritative: inherited Claude-specific API
+keys, OAuth inputs, provider selectors (Bedrock, Vertex, Foundry, Anthropic
+AWS/Mantle), Anthropic profile/federation selectors, endpoint overrides, and
+the secure-storage redirect are removed before Claude starts. Generic cloud
+environment such as `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
+`GOOGLE_APPLICATION_CREDENTIALS`, and `AZURE_CLIENT_ID` is left alone.
+
+For a named account, the manager also sets `ANTHROPIC_CONFIG_DIR` to
+`~/.claude-switch/accounts/<name>/.anthropic`. This prevents an inherited
+`ANTHROPIC_CONFIG_DIR` or the global Anthropic `active_config` profile from
+changing that account's effective identity under Anthropic's documented
+[profile resolution order](https://platform.claude.com/docs/en/manage-claude/wif-reference#configuration-directory).
+The manager does not read, copy, or migrate the global Anthropic profile
+directory.
+
+The `default` account intentionally behaves differently: it leaves
+`ANTHROPIC_CONFIG_DIR` untouched, preserving Claude's normal upstream profile
+resolution through an inherited value or the platform-global Anthropic
+configuration directory.
+
+Settings inside the selected account still belong to Claude Code. In
+particular, an account's own `settings.json` may intentionally select a cloud
+provider or use `apiKeyHelper`; the manager does not parse or rewrite it.
+
+On Windows, the normal credentials file is
+`%USERPROFILE%\.claude\.credentials.json`. With `CLAUDE_CONFIG_DIR`, it is
+`<CLAUDE_CONFIG_DIR>\.credentials.json`. The manager does not read, copy, or
+migrate that file during launch.
+
+Windows resolves `claude` once from absolute `PATH` entries and never searches
+the current repository first. Native `.exe` and `.com` installations are
+started directly. A recognized npm layout runs its concrete `cli.js` through
+Node directly; an unknown `.cmd` or `.bat` remains a restricted compatibility
+fallback and rejects shell-significant arguments it cannot represent safely.
+
 ### Per-account default model
 
 Because every account has its own `settings.json`, you get a per-account default model for free — no extra flag or config. Set Claude Code's [`model`](https://code.claude.com/docs/en/settings) key in that account's settings file:

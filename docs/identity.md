@@ -9,6 +9,11 @@ and how much of its rate limit is gone.
 
 `claude-acc add` and `claude-acc login` both run `claude auth login` under a per-account `CLAUDE_CONFIG_DIR`. Whatever Anthropic account you sign in with becomes the identity for that directory — and there's no built-in surface to see which account is actually behind a given config dir. If you accidentally log in with the wrong identity (browser auto-fill, a stale tab), the switch is silent: rate limits, conversation history, and billing leak across what you thought were isolated accounts.
 
+The login launch uses the same authentication boundary as `run`: inherited
+Claude credential/provider/routing variables cannot replace the selected
+profile. Account-local and project-local Claude settings still apply after
+startup, including an intentional `apiKeyHelper` or cloud-provider choice.
+
 `claude-acc doctor` reads each account's OAuth token from the macOS Keychain (with a `.credentials.json` fallback for non-Keychain installs), calls `https://api.anthropic.com/api/oauth/profile`, and prints the live email, plan, and UUID:
 
 ```
