@@ -36,6 +36,9 @@ $managerBin = Join-Path $managerTarget 'bin'
 $accounts = Join-Path $managerTarget 'accounts'
 $personal1 = Join-Path $accounts 'personal1'
 $personal2 = Join-Path $accounts 'personal2'
+$logicalAccounts = Join-Path $managerLink 'accounts'
+$logicalPersonal1 = Join-Path $logicalAccounts 'personal1'
+$logicalPersonal2 = Join-Path $logicalAccounts 'personal2'
 $trustedBin = Join-Path $root 'trusted real Claude Ω'
 $captureDir = Join-Path $root 'captures'
 $linkedRoot = Join-Path $root 'linked repo 漢字'
@@ -161,8 +164,8 @@ try {
     $ordinary = Invoke-Shim 'linked-ordinary' $linkedRoot @('a', 'b c')
     Assert-Equal $ordinary.Code 0 'linked launch exit'
     Assert-Equal ($ordinary.Record.argv -join ',') 'a,b c' 'linked argv'
-    Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.config_dir)) ([IO.Path]::GetFullPath($personal1)) 'linked CLAUDE_CONFIG_DIR'
-    Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath((Join-Path $personal1 '.anthropic'))) 'linked ANTHROPIC_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.config_dir)) ([IO.Path]::GetFullPath($logicalPersonal1)) 'linked CLAUDE_CONFIG_DIR'
+    Assert-Equal ([IO.Path]::GetFullPath($ordinary.Record.anthropic_config_dir)) ([IO.Path]::GetFullPath((Join-Path $logicalPersonal1 '.anthropic'))) 'linked ANTHROPIC_CONFIG_DIR'
     Assert-Equal $ordinary.Record.denylisted_present.Count 0 'linked environment scrub'
 
     $empty = Invoke-Shim 'empty-argv' $linkedRoot @()
@@ -176,7 +179,7 @@ try {
     Assert-Equal ($bareResume.Record.argv -join ',') '--resume' 'bare resume picker changed'
 
     $nested = Invoke-Shim 'nested-nearest' $nestedChild @('--version')
-    Assert-Equal ([IO.Path]::GetFullPath($nested.Record.config_dir)) ([IO.Path]::GetFullPath($personal2)) 'nearest ancestor did not win'
+    Assert-Equal ([IO.Path]::GetFullPath($nested.Record.config_dir)) ([IO.Path]::GetFullPath($logicalPersonal2)) 'nearest ancestor did not win'
 
     foreach ($case in @(
         @{ Name = 'unlinked-default'; Cwd = $unlinked },
