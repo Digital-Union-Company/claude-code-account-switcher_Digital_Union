@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 #[cfg(not(decoy))]
 use std::{env, fs, path::PathBuf};
 use std::process;
@@ -112,4 +114,3 @@ fn json_string(value: &str) -> String {
     escaped.push('"');
     escaped
 }
-#![allow(unexpected_cfgs)]
