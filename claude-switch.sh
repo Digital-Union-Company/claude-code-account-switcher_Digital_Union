@@ -67,6 +67,8 @@ _claude_msg_en=(
     help_usage          "Show 5h / 7d usage for every account"
     help_update         "Update claude-switch.sh from GitHub"
     help_run            "Run claude under a specific account"
+    help_cloud          "Start a new cloud session in Auto mode"
+    help_teleport       "Pull a cloud session into this terminal"
     help_doctor         "Audit each account OAuth identity (email, UUID)"
     help_whoami         "Print active account email (or name fallback)"
     help_clone_settings "Copy ~/.claude/ config into an existing account"
@@ -131,6 +133,11 @@ _claude_msg_en=(
     import_verified     "Verified identity: %s"
     run_usage           "Usage: claude-acc run <name> [args...]"
     run_not_found       "Account '%s' not found."
+    cloud_usage         "Usage: claude-acc cloud <account|default> <description>"
+    cloud_empty         "Cloud task description must not be empty."
+    cloud_locator       "That description identifies an existing cloud session. This command only starts new sessions; use 'claude-acc teleport' to bring an existing session into the terminal."
+    teleport_usage      "Usage: claude-acc teleport <account|default> <session-id>"
+    teleport_empty      "Cloud session identifier must not be empty."
     doctor_header       "Auditing %d account(s):"
     doctor_no_token     "no token (run: claude-acc login %s)"
     doctor_offline      "token present, but API unreachable"
@@ -214,6 +221,8 @@ _claude_msg_ru=(
     help_usage          "Показать использование 5ч / 7д по всем аккаунтам"
     help_update         "Обновить claude-switch.sh с GitHub"
     help_run            "Запустить claude под конкретным аккаунтом"
+    help_cloud          "Запустить новую облачную сессию в режиме Auto"
+    help_teleport       "Перенести облачную сессию в этот терминал"
     help_doctor         "Аудит OAuth-личности каждого аккаунта (email, UUID)"
     help_whoami         "Email активного аккаунта (или имя как fallback)"
     help_clone_settings "Скопировать конфиг ~/.claude/ в существующий аккаунт"
@@ -278,6 +287,11 @@ _claude_msg_ru=(
     import_verified     "Личность подтверждена: %s"
     run_usage           "Использование: claude-acc run <name> [args...]"
     run_not_found       "Аккаунт '%s' не найден."
+    cloud_usage         "Использование: claude-acc cloud <аккаунт|default> <описание>"
+    cloud_empty         "Описание облачной задачи не должно быть пустым."
+    cloud_locator       "Это описание указывает на существующую облачную сессию. Команда запускает только новые сессии; чтобы перенести существующую сессию в терминал, используйте 'claude-acc teleport'."
+    teleport_usage      "Использование: claude-acc teleport <аккаунт|default> <id-сессии>"
+    teleport_empty      "Идентификатор облачной сессии не должен быть пустым."
     doctor_header       "Проверка %d аккаунт(ов):"
     doctor_no_token     "нет токена (запустите: claude-acc login %s)"
     doctor_offline      "токен есть, API недоступен"
@@ -594,6 +608,8 @@ _claude_acc_help() {
     echo "  claude-acc usage             $(_msg help_usage)"
     echo "  claude-acc update            $(_msg help_update)"
     echo "  claude-acc run <name> [...]  $(_msg help_run)"
+    echo "  claude-acc cloud <name> <task>    $(_msg help_cloud)"
+    echo "  claude-acc teleport <name> <id>   $(_msg help_teleport)"
     echo "  claude-acc doctor [--json]   $(_msg help_doctor)"
     echo "  claude-acc whoami            $(_msg help_whoami)"
     echo "  claude-acc add -s <name>     $(_msg help_add) (seeded from ~/.claude/)"
@@ -1178,6 +1194,58 @@ _claude_acc_run() {
         CLAUDE_CONFIG_DIR="$acc_dir" \
             ANTHROPIC_CONFIG_DIR="$acc_dir/.anthropic" command claude "$@"
     )
+}
+
+# An exact upstream cloud-session locator changes --cloud from session
+# creation into existing-session mode. Keep the dedicated command creation-
+# only without rejecting ordinary prose that merely mentions an id or URL.
+_claude_acc_cloud_locator() {
+    emulate -L zsh
+    setopt extended_glob
+    local value="${1:-}" candidate id
+    value="${${value##[[:space:]]#}%%[[:space:]]#}"
+    [[ "$value" == *[[:space:]]* ]] && return 1
+
+    candidate="${value:l}"
+    case "$candidate" in
+        https://*) candidate="${candidate#https://}" ;;
+        http://*)  candidate="${candidate#http://}" ;;
+    esac
+    [[ "$candidate" == session_?* || "$candidate" == cse_?* ]] && return 0
+    [[ "$candidate" == claude.ai/code/* ]] || return 1
+    id="${candidate#claude.ai/code/}"
+    id="${id%%[?#]*}"
+    [[ "$id" == session_?* || "$id" == cse_?* ]]
+}
+
+_claude_acc_cloud() {
+    if (( $# != 2 )); then
+        _msg cloud_usage
+        return 1
+    fi
+    local name="$1" description="$2"
+    if [[ -z "${description//[[:space:]]/}" ]]; then
+        _msg cloud_empty
+        return 1
+    fi
+    if _claude_acc_cloud_locator "$description"; then
+        _msg cloud_locator
+        return 1
+    fi
+    _claude_acc_run "$name" --cloud "$description" --permission-mode auto
+}
+
+_claude_acc_teleport() {
+    if (( $# != 2 )); then
+        _msg teleport_usage
+        return 1
+    fi
+    local name="$1" session="$2"
+    if [[ -z "${session//[[:space:]]/}" ]]; then
+        _msg teleport_empty
+        return 1
+    fi
+    _claude_acc_run "$name" --teleport "$session"
 }
 
 # =============================================================
@@ -2711,6 +2779,8 @@ claude-acc() {
         usage)   _claude_acc_usage "$@" ;;
         update)  _claude_acc_update "$@" ;;
         run)     _claude_acc_run "$@" ;;
+        cloud)   _claude_acc_cloud "$@" ;;
+        teleport) _claude_acc_teleport "$@" ;;
         doctor)  _claude_acc_doctor "$@" ;;
         whoami)  _claude_acc_whoami ;;
         clone-settings) _claude_acc_clone_settings "$@" ;;
@@ -2741,6 +2811,8 @@ _claude_acc_completion() {
         "usage:$(_msg help_usage)"
         "update:$(_msg help_update)"
         "run:$(_msg help_run)"
+        "cloud:$(_msg help_cloud)"
+        "teleport:$(_msg help_teleport)"
         "lock:$(_msg help_lock)"
         "doctor:$(_msg help_doctor)"
         "whoami:$(_msg help_whoami)"
@@ -2758,7 +2830,7 @@ _claude_acc_completion() {
                 accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
                 _describe 'account' accounts
                 ;;
-            default|link|login|run)
+            default|link|login|run|cloud|teleport)
                 accounts=("default" "$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
                 _describe 'account' accounts
                 ;;

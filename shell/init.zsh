@@ -62,6 +62,8 @@ _claude_acc_completion() {
         'update:Update the binary to the latest release'
         'install:Install binary and shell integration'
         'run:Run claude under a specific account'
+        'cloud:Start a new cloud session in Auto mode'
+        'teleport:Pull a cloud session into this terminal'
         'doctor:Audit each account OAuth identity'
         'whoami:Print active account email'
         'clone-settings:Copy ~/.claude/ config into account'
@@ -121,7 +123,7 @@ _claude_acc_completion() {
             remove|clone-settings)
                 _claude_acc_accounts
                 ;;
-            default|link|login|run|lock)
+            default|link|login|run|cloud|teleport|lock)
                 _claude_acc_accounts with-default
                 ;;
             session)

@@ -91,6 +91,8 @@ claude-acc link work
 | `claude-acc vscode install\|uninstall\|status` | Wire the VS Code extension's native UI up to directory-bound accounts |
 | `claude-acc statusline [--install]` | Render (or install) a Claude Code status line with the active account |
 | `claude-acc run <name>` | Run claude under a specific account |
+| `claude-acc cloud <name\|default> <description>` | Start a new account-bound cloud session in Auto mode |
+| `claude-acc teleport <name\|default> <session-id>` | Pull a cloud session into the terminal under the selected account |
 | `claude-acc whoami` | Print the email (or name) of the active account |
 | `claude-acc lock <name>` | Pin an account to the identity it is signed in as (`--force` to re-pin) |
 | `claude-acc doctor [--json]` | Audit each account's actual OAuth identity, and report drift from the pin |
@@ -164,6 +166,7 @@ The README is the overview. Each topic has its own page:
 | Check which Anthropic account a config dir is really signed in as, and how much limit is left | [Identities: `doctor`, `lock`, `usage`](docs/identity.md) |
 | Run several Claude Desktop accounts side by side | [Claude Desktop profiles](docs/desktop.md) |
 | Show the active account in Claude Code's status bar | [Status line](docs/statusline.md) |
+| Start cloud work or bring a cloud session into the terminal under a selected account | [Cloud sessions and teleport](docs/cloud.md) |
 | See how this compares to cswap, aisw and the direnv recipe | [Comparison with other tools](docs/comparison.md) |
 
 ## Language

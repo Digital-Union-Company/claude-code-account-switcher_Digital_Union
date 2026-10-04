@@ -89,6 +89,29 @@ impl I18n {
             (Msg::LoginNotFound(ref n), Lang::Ru) => format!("Аккаунт '{}' не найден.", n),
             (Msg::LoginStart(ref n), Lang::En) => format!("Logging in to '{}'...", n),
             (Msg::LoginStart(ref n), Lang::Ru) => format!("Вхожу в '{}'...", n),
+            (Msg::CloudDescriptionEmpty, Lang::En) => {
+                s("Cloud task description must not be empty.")
+            }
+            (Msg::CloudDescriptionEmpty, Lang::Ru) => {
+                s("Описание облачной задачи не должно быть пустым.")
+            }
+            (Msg::CloudExistingSessionLocator, Lang::En) => s(
+                "That description identifies an existing cloud session. This \
+                 command only starts new sessions; use `claude-acc teleport` \
+                 to bring an existing session into the terminal.",
+            ),
+            (Msg::CloudExistingSessionLocator, Lang::Ru) => s(
+                "Это описание указывает на существующую облачную сессию. \
+                 Команда запускает только новые сессии; чтобы перенести \
+                 существующую сессию в терминал, используйте \
+                 `claude-acc teleport`.",
+            ),
+            (Msg::TeleportSessionEmpty, Lang::En) => {
+                s("Cloud session identifier must not be empty.")
+            }
+            (Msg::TeleportSessionEmpty, Lang::Ru) => {
+                s("Идентификатор облачной сессии не должен быть пустым.")
+            }
             (Msg::ClaudeNotFound, Lang::En) => s(
                 "Couldn't find `claude` on PATH. Install Claude Code, or open \
                  a new shell if you just did.",
@@ -1276,6 +1299,9 @@ pub enum Msg {
     LoginNotFound(String),
     LoginStart(String),
     LoginDone,
+    CloudDescriptionEmpty,
+    CloudExistingSessionLocator,
+    TeleportSessionEmpty,
     RemoveNotFound(String),
     RemoveConfirm(String),
     RemovePurgeConfirm(String),
