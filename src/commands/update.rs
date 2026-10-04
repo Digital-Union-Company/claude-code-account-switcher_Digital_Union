@@ -603,8 +603,8 @@ mod tests {
 
         assert!(refresh_existing_wrapper(&config, &binary).is_err());
         assert_eq!(std::fs::read(&binary).unwrap(), b"updated manager");
-        assert_eq!(std::fs::read(&wrapper).unwrap(), b"old shim");
         drop(_lock);
+        assert_eq!(std::fs::read(&wrapper).unwrap(), b"old shim");
         let _ = std::fs::remove_dir_all(&config.base_dir);
     }
 

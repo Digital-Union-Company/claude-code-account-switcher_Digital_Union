@@ -249,8 +249,8 @@ mod windows_tests {
             .open(&wrapper)
             .unwrap();
         assert!(install_wrapper(&config, &source).is_err());
-        assert_eq!(fs::read(&wrapper).unwrap(), b"old manager binary");
         drop(_lock);
+        assert_eq!(fs::read(&wrapper).unwrap(), b"old manager binary");
         let _ = fs::remove_dir_all(root);
     }
 }
