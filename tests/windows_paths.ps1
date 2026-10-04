@@ -85,8 +85,8 @@ function Invoke-ManagerCapture {
     }
     [pscustomobject]@{
         Code = $code
-        Stdout = if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout -Raw } else { '' }
-        Stderr = if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Raw } else { '' }
+        Stdout = if (Test-Path -LiteralPath $stdout) { [string](Get-Content -LiteralPath $stdout -Raw) } else { '' }
+        Stderr = if (Test-Path -LiteralPath $stderr) { [string](Get-Content -LiteralPath $stderr -Raw) } else { '' }
     }
 }
 
