@@ -220,7 +220,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            vec![OsStr::new("cli.js"), OsStr::new("auth"), OsStr::new("login")]
+            vec![
+                OsStr::new("cli.js"),
+                OsStr::new("auth"),
+                OsStr::new("login")
+            ]
         );
     }
 
@@ -233,7 +237,10 @@ mod tests {
         let command = launch
             .command_for_resolved(ResolvedClaude::Native(PathBuf::from("claude.exe")))
             .unwrap();
-        assert_eq!(env(&command, "CLAUDE_CONFIG_DIR"), Some(Some(OsStr::new("account path"))));
+        assert_eq!(
+            env(&command, "CLAUDE_CONFIG_DIR"),
+            Some(Some(OsStr::new("account path")))
+        );
         assert_eq!(env(&command, "CLAUDE_ACC_RUN_DEFAULT"), Some(None));
         for variable in CLAUDE_AUTH_ENV_VARS {
             assert_eq!(env(&command, variable), Some(None), "{variable}");
@@ -247,6 +254,9 @@ mod tests {
             .command_for_resolved(ResolvedClaude::Native(PathBuf::from("claude.exe")))
             .unwrap();
         assert_eq!(env(&command, "CLAUDE_CONFIG_DIR"), Some(None));
-        assert_eq!(env(&command, "CLAUDE_ACC_RUN_DEFAULT"), Some(Some(OsStr::new("1"))));
+        assert_eq!(
+            env(&command, "CLAUDE_ACC_RUN_DEFAULT"),
+            Some(Some(OsStr::new("1")))
+        );
     }
 }

@@ -87,12 +87,7 @@ fn find_native_executable(
     path: Option<&OsStr>,
     excluded_dir: Option<&Path>,
 ) -> Option<PathBuf> {
-    find_executable(
-        name,
-        path,
-        Some(OsStr::new(".EXE;.COM")),
-        excluded_dir,
-    )
+    find_executable(name, path, Some(OsStr::new(".EXE;.COM")), excluded_dir)
 }
 
 /// Search PATH in order without consulting cwd. Only absolute entries are
@@ -237,12 +232,7 @@ mod tests {
         fs::write(shim.join("claude.exe"), "shim").unwrap();
         fs::write(real.join("claude.exe"), "real").unwrap();
         let path = std::env::join_paths([shim.as_path(), real.as_path()]).unwrap();
-        let found = find_executable(
-            "claude",
-            Some(&path),
-            Some(OsStr::new(".exe")),
-            Some(&shim),
-        );
+        let found = find_executable("claude", Some(&path), Some(OsStr::new(".exe")), Some(&shim));
         assert_eq!(found, fs::canonicalize(real.join("claude.exe")).ok());
         let _ = fs::remove_dir_all(root);
     }
@@ -271,11 +261,21 @@ mod tests {
         fs::write(&cli, "cli").unwrap();
         let path = std::env::join_paths([root.as_path()]).unwrap();
         let resolved = resolve_claude(Some(&path), Some(OsStr::new(".cmd")), None);
-        let Some(ResolvedClaude::Npm { node, cli: found_cli }) = resolved else {
+        let Some(ResolvedClaude::Npm {
+            node,
+            cli: found_cli,
+        }) = resolved
+        else {
             panic!("npm layout was not recognized");
         };
-        assert_eq!(fs::canonicalize(node).unwrap(), fs::canonicalize(root.join("node.exe")).unwrap());
-        assert_eq!(fs::canonicalize(found_cli).unwrap(), fs::canonicalize(cli).unwrap());
+        assert_eq!(
+            fs::canonicalize(node).unwrap(),
+            fs::canonicalize(root.join("node.exe")).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(found_cli).unwrap(),
+            fs::canonicalize(cli).unwrap()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

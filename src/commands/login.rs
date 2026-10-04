@@ -113,9 +113,6 @@ mod tests {
     #[test]
     fn login_process_uses_claude_auth_login_args() {
         let process = build_login_process(&config(), None);
-        assert_eq!(
-            process.argv(),
-            [OsStr::new("auth"), OsStr::new("login")]
-        );
+        assert_eq!(process.argv(), [OsStr::new("auth"), OsStr::new("login")]);
     }
 }

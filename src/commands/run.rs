@@ -25,10 +25,7 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, args: &[String]) {
         if let Some(dir) = dir.as_deref() {
             super::session::preflight_resume(config, i18n, args, sessions::DEFAULT_LABEL, dir);
         }
-        std::process::exit(super::spawn_claude(
-            build_process(config, args, None),
-            i18n,
-        ));
+        std::process::exit(super::spawn_claude(build_process(config, args, None), i18n));
     }
 
     if !validate_name(name) {
