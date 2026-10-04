@@ -67,7 +67,7 @@ _claude_msg_en=(
     help_usage          "Show 5h / 7d usage for every account"
     help_update         "Update claude-switch.sh from GitHub"
     help_run            "Run claude under a specific account"
-    help_cloud          "Start a new cloud session in Auto mode"
+    help_cloud          "Request Auto mode for a new cloud session"
     help_teleport       "Pull a cloud session into this terminal"
     help_doctor         "Audit each account OAuth identity (email, UUID)"
     help_whoami         "Print active account email (or name fallback)"
@@ -135,7 +135,6 @@ _claude_msg_en=(
     run_not_found       "Account '%s' not found."
     cloud_usage         "Usage: claude-acc cloud <account|default> <description>"
     cloud_empty         "Cloud task description must not be empty."
-    cloud_locator       "That description identifies an existing cloud session. This command only starts new sessions; use 'claude-acc teleport' to bring an existing session into the terminal."
     teleport_usage      "Usage: claude-acc teleport <account|default> <session-id>"
     teleport_empty      "Cloud session identifier must not be empty."
     doctor_header       "Auditing %d account(s):"
@@ -221,7 +220,7 @@ _claude_msg_ru=(
     help_usage          "Показать использование 5ч / 7д по всем аккаунтам"
     help_update         "Обновить claude-switch.sh с GitHub"
     help_run            "Запустить claude под конкретным аккаунтом"
-    help_cloud          "Запустить новую облачную сессию в режиме Auto"
+    help_cloud          "Запросить режим Auto для новой облачной сессии"
     help_teleport       "Перенести облачную сессию в этот терминал"
     help_doctor         "Аудит OAuth-личности каждого аккаунта (email, UUID)"
     help_whoami         "Email активного аккаунта (или имя как fallback)"
@@ -289,7 +288,6 @@ _claude_msg_ru=(
     run_not_found       "Аккаунт '%s' не найден."
     cloud_usage         "Использование: claude-acc cloud <аккаунт|default> <описание>"
     cloud_empty         "Описание облачной задачи не должно быть пустым."
-    cloud_locator       "Это описание указывает на существующую облачную сессию. Команда запускает только новые сессии; чтобы перенести существующую сессию в терминал, используйте 'claude-acc teleport'."
     teleport_usage      "Использование: claude-acc teleport <аккаунт|default> <id-сессии>"
     teleport_empty      "Идентификатор облачной сессии не должен быть пустым."
     doctor_header       "Проверка %d аккаунт(ов):"
@@ -1196,28 +1194,6 @@ _claude_acc_run() {
     )
 }
 
-# An exact upstream cloud-session locator changes --cloud from session
-# creation into existing-session mode. Keep the dedicated command creation-
-# only without rejecting ordinary prose that merely mentions an id or URL.
-_claude_acc_cloud_locator() {
-    emulate -L zsh
-    setopt extended_glob
-    local value="${1:-}" candidate id
-    value="${${value##[[:space:]]#}%%[[:space:]]#}"
-    [[ "$value" == *[[:space:]]* ]] && return 1
-
-    candidate="${value:l}"
-    case "$candidate" in
-        https://*) candidate="${candidate#https://}" ;;
-        http://*)  candidate="${candidate#http://}" ;;
-    esac
-    [[ "$candidate" == session_?* || "$candidate" == cse_?* ]] && return 0
-    [[ "$candidate" == claude.ai/code/* ]] || return 1
-    id="${candidate#claude.ai/code/}"
-    id="${id%%[?#]*}"
-    [[ "$id" == session_?* || "$id" == cse_?* ]]
-}
-
 _claude_acc_cloud() {
     if (( $# != 2 )); then
         _msg cloud_usage
@@ -1226,10 +1202,6 @@ _claude_acc_cloud() {
     local name="$1" description="$2"
     if [[ -z "${description//[[:space:]]/}" ]]; then
         _msg cloud_empty
-        return 1
-    fi
-    if _claude_acc_cloud_locator "$description"; then
-        _msg cloud_locator
         return 1
     fi
     _claude_acc_run "$name" --cloud "$description" --permission-mode auto

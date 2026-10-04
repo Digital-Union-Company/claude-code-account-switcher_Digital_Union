@@ -95,17 +95,6 @@ impl I18n {
             (Msg::CloudDescriptionEmpty, Lang::Ru) => {
                 s("Описание облачной задачи не должно быть пустым.")
             }
-            (Msg::CloudExistingSessionLocator, Lang::En) => s(
-                "That description identifies an existing cloud session. This \
-                 command only starts new sessions; use `claude-acc teleport` \
-                 to bring an existing session into the terminal.",
-            ),
-            (Msg::CloudExistingSessionLocator, Lang::Ru) => {
-                s("Это описание указывает на существующую облачную сессию. \
-                 Команда запускает только новые сессии; чтобы перенести \
-                 существующую сессию в терминал, используйте \
-                 `claude-acc teleport`.")
-            }
             (Msg::TeleportSessionEmpty, Lang::En) => {
                 s("Cloud session identifier must not be empty.")
             }
@@ -1300,7 +1289,6 @@ pub enum Msg {
     LoginStart(String),
     LoginDone,
     CloudDescriptionEmpty,
-    CloudExistingSessionLocator,
     TeleportSessionEmpty,
     RemoveNotFound(String),
     RemoveConfirm(String),

@@ -97,21 +97,32 @@ assert_capture 'teleport default preserves upstream profile semantics' \
     'arg=--teleport' \
     'arg=cse_opaque'
 
-for locator in \
+export CLAUDE_ACC_SHELL_EXIT_CODE=23
+for task_description in \
     session_012345 \
     cse_012345 \
     'https://claude.ai/code/session_012345' \
     'claude.ai/code/cse_012345?from=cli'; do
-    if run_manager cloud personal1 "$locator"; then
-        print -r -- "FAIL — cloud locator accepted: $locator"
+    run_manager cloud personal1 "$task_description"
+    child_status=$?
+    if (( child_status != 23 )); then
+        print -r -- "FAIL — cloud locator-like task exit: $task_description (got $child_status)"
         (( failures++ ))
-    elif [[ -e "$capture" ]]; then
-        print -r -- "FAIL — cloud locator launched Claude: $locator"
+    elif [[ ! -e "$capture" ]]; then
+        print -r -- "FAIL — cloud locator-like task did not launch Claude: $task_description"
         (( failures++ ))
     else
-        print -r -- "ok   — cloud locator rejected: $locator"
+        assert_capture "cloud locator-like task forwarded: $task_description" \
+            "config=$CLAUDE_SWITCH_ACCOUNTS_DIR/personal1" \
+            "anthropic=$CLAUDE_SWITCH_ACCOUNTS_DIR/personal1/.anthropic" \
+            'auth_present=' \
+            'arg=--cloud' \
+            "arg=$task_description" \
+            'arg=--permission-mode' \
+            'arg=auto'
     fi
 done
+export CLAUDE_ACC_SHELL_EXIT_CODE=0
 
 if run_manager cloud personal1 task --dangerously-skip-permissions; then
     print -r -- 'FAIL — cloud bypass argument accepted'

@@ -91,7 +91,7 @@ claude-acc link work
 | `claude-acc vscode install\|uninstall\|status` | Wire the VS Code extension's native UI up to directory-bound accounts |
 | `claude-acc statusline [--install]` | Render (or install) a Claude Code status line with the active account |
 | `claude-acc run <name>` | Run claude under a specific account |
-| `claude-acc cloud <name\|default> <description>` | Start a new account-bound cloud session in Auto mode |
+| `claude-acc cloud <name\|default> <description>` | Start a new account-bound cloud session and request Auto mode |
 | `claude-acc teleport <name\|default> <session-id>` | Pull a cloud session into the terminal under the selected account |
 | `claude-acc whoami` | Print the email (or name) of the active account |
 | `claude-acc lock <name>` | Pin an account to the identity it is signed in as (`--force` to re-pin) |

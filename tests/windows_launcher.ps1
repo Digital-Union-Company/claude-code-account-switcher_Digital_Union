@@ -203,9 +203,24 @@ try {
     Assert-Equal $cloudBypass.Code 2 'cloud bypass must fail Clap validation'
     Assert-True ($null -eq $cloudBypass.Record) 'cloud bypass unexpectedly launched Claude'
 
-    $cloudLocator = Invoke-Manager 'cloud-locator-rejected' @('cloud', 'personal1', 'session_012345')
-    Assert-Equal $cloudLocator.Code 1 'cloud locator must fail manager validation'
-    Assert-True ($null -eq $cloudLocator.Record) 'cloud locator unexpectedly launched Claude'
+    $locatorLikeTasks = @(
+        'session_012345',
+        'cse_012345',
+        'https://claude.ai/code/session_012345',
+        'claude.ai/code/cse_012345?from=cli'
+    )
+    for ($index = 0; $index -lt $locatorLikeTasks.Count; $index++) {
+        $task = $locatorLikeTasks[$index]
+        $locatorLike = Invoke-Manager "cloud-locator-like-$index" @('cloud', 'personal1', $task) 23
+        Assert-Equal $locatorLike.Code 23 "cloud locator-like task $index child exit"
+        Assert-True ($null -ne $locatorLike.Record) "cloud locator-like task $index did not launch Claude"
+        Assert-Equal $locatorLike.Record.argv.Count 4 "cloud locator-like task $index argv count"
+        Assert-Equal $locatorLike.Record.argv[0] '--cloud' "cloud locator-like task $index argv[0]"
+        Assert-Equal $locatorLike.Record.argv[1] $task "cloud locator-like task $index changed"
+        Assert-Equal $locatorLike.Record.argv[2] '--permission-mode' "cloud locator-like task $index argv[2]"
+        Assert-Equal $locatorLike.Record.argv[3] 'auto' "cloud locator-like task $index argv[3]"
+        Assert-True (-not ($locatorLike.Record.argv -contains '-p')) "cloud locator-like task $index injected -p"
+    }
 
     foreach ($case in @(
         @{ Name = 'cloud-missing-account'; Args = @('cloud', 'missing', 'task') },

@@ -23,20 +23,23 @@ auto
 ```
 
 The task stays immediately after `--cloud`. The command always requests Auto
-mode because it is intended for hands-off cloud execution. Bypass permissions
-is intentionally unavailable: cloud sessions do not support it, and extra
-flags such as `--dangerously-skip-permissions` are rejected before Claude
-starts. To choose another upstream mode or use other advanced Claude flags,
-use the transparent escape hatch instead:
+mode because it is intended for hands-off cloud execution. Upstream Claude
+only makes Auto available when the account's organization policy permits it
+and the selected model supports it; `claude-acc` does not try to predict that
+availability. Cloud sessions offer Accept edits, Plan, and Auto, but not
+Bypass permissions. Extra flags such as `--dangerously-skip-permissions` are
+rejected before Claude starts. To choose another upstream mode or use other
+advanced Claude flags, use the transparent escape hatch instead:
 
 ```bash
 claude-acc run personal1 --cloud "Plan this migration" --permission-mode plan
 ```
 
-The dedicated command is creation-only. An exact `session_...` or `cse_...`
-identifier, or a supported `claude.ai/code/...` session URL, is rejected so
-upstream `--cloud` cannot accidentally address an existing session. Ordinary
-task prose that merely mentions one of those strings is allowed.
+The dedicated command is creation-only by construction: it never passes
+`-p`, which upstream Claude requires when `--cloud` sends a follow-up to an
+existing session. Therefore even an exact `session_...`, `cse_...`, or
+`claude.ai/code/...` string is forwarded as the new session's task
+description. R2 does not add a manager-side follow-up command.
 
 ### Account and eligibility
 
