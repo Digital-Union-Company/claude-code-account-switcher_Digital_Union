@@ -295,6 +295,44 @@ out=$(claude-acc links --json)
 check "whitespace-only account after = is LINKS_STORE_INVALID" \
     "LINKS_STORE_INVALID" "$(jqf '.error.code' "$out")"
 
+# D. A path containing an internal TAB character must survive the parser
+# intact. Regression: the parser used to shuttle its parsed pair through
+# the caller as a single "stored<TAB>account" string, re-split on TAB —
+# which silently truncated/corrupted any stored path that itself
+# contained a TAB, exactly the kind of valid-but-unusual path Rust's
+# parse_link_line (no internal delimiter at all) never had trouble with.
+tab_path="$scratch/repo"$'\t'"name"
+mkdir -p "$tab_path" "$CLAUDE_SWITCH_ACCOUNTS_DIR/personal2"
+: > "$CLAUDE_SWITCH_LINKS"
+print -r -- "${tab_path}=personal2" > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "a stored path containing an internal TAB is preserved exactly" \
+    "$tab_path" "$(jqf '.links[0].stored_path' "$out")"
+check "its account parses correctly despite the internal TAB" \
+    "personal2" "$(jqf '.links[0].account' "$out")"
+
+status_out=$(claude-acc status --json --path "$tab_path")
+check "status --json resolves a path containing an internal TAB" \
+    "personal2" "$(jqf '.resolved_account' "$status_out")"
+check "status --json reports a TAB-containing path as linked" \
+    "linked" "$(jqf '.source' "$status_out")"
+check "status --json's owning_link_path preserves the internal TAB exactly" \
+    "$tab_path" "$(jqf '.owning_link_path' "$status_out")"
+
+# E. TAB used purely as syntactic whitespace immediately around the
+# delimiter is trimmed, same as a literal space (test B above) — this is
+# the other half of D's distinction: an internal TAB *inside* the parsed
+# value survives; TAB *as the padding around `=`* does not.
+clean_dir="$scratch/tabtrim"
+mkdir -p "$clean_dir"
+: > "$CLAUDE_SWITCH_LINKS"
+printf '\t%s\t=\tpersonal2\t\n' "$clean_dir" > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "TAB as syntactic whitespace around = is trimmed from the path" \
+    "$clean_dir" "$(jqf '.links[0].stored_path' "$out")"
+check "TAB as syntactic whitespace around = is trimmed from the account" \
+    "personal2" "$(jqf '.links[0].account' "$out")"
+
 print -r -- ""
 print -r -- "machine-mode dependency failures (independent-review correction):"
 

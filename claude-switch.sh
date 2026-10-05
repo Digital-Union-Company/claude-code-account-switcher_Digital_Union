@@ -1140,10 +1140,22 @@ _claude_acc_trim_whitespace() {
 # parse_link_line exactly: split on the FINAL `=` (so a stored path that
 # itself contains `=` characters still parses correctly, e.g.
 # "C:\repo=a=work" -> stored "C:\repo=a", account "work"), then trim
-# whitespace immediately touching the delimiter from each side. Prints
-# "stored_path<TAB>account" and returns 0 on success; returns 1 (printing
-# nothing) if the line has no `=` at all, or either trimmed side is
-# empty. This is the one parser both `links --json` and `status --json`'s
+# whitespace immediately touching the delimiter from each side.
+#
+# The parsed pair is never serialized back through a delimiter
+# character — a path may legitimately contain a TAB (or any other single
+# character this function might otherwise have picked as a sentinel),
+# and re-splitting a serialized "stored<X>account" string on `X` would
+# silently corrupt such a path. Instead, on success this assigns the
+# CALLER's `_claude_acc_parsed_link` array — zsh's dynamic scoping means
+# a name this function does not `local`-declare itself resolves to the
+# nearest enclosing scope that did, so the caller declares
+# `local -a _claude_acc_parsed_link` before calling this, and reads
+# `_claude_acc_parsed_link[1]`/`[2]` after a successful (0) return. On
+# failure (1) — the line has no `=` at all, or either trimmed side is
+# empty — the caller's array is left untouched and should not be read.
+#
+# This is the one parser both `links --json` and `status --json`'s
 # exact-path lookup use (see _claude_links_accounts_for_dir below), so
 # the two can never disagree about what a stored line means. Deliberately
 # separate from the pre-existing permissive human-mode parsing in
@@ -1155,7 +1167,7 @@ _claude_acc_parse_link_line_machine() {
     stored=$(_claude_acc_trim_whitespace "${line%=*}")
     account=$(_claude_acc_trim_whitespace "${line##*=}")
     [[ -z "$stored" || -z "$account" ]] && return 1
-    printf '%s\t%s' "$stored" "$account"
+    _claude_acc_parsed_link=("$stored" "$account")
 }
 
 # `claude-acc links --json` (CM0.5) — docs/machine-api.md §3's stored
@@ -1179,13 +1191,14 @@ _claude_acc_links_json() {
     fi
 
     local -a bad_lines
-    local line_no=0 line parsed stored account
+    local line_no=0 line stored account
+    local -a _claude_acc_parsed_link
     local links_json="[]"
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( line_no++ ))
-        if parsed=$(_claude_acc_parse_link_line_machine "$line"); then
-            stored="${parsed%%$'\t'*}"
-            account="${parsed#*$'\t'}"
+        if _claude_acc_parse_link_line_machine "$line"; then
+            stored="${_claude_acc_parsed_link[1]}"
+            account="${_claude_acc_parsed_link[2]}"
             links_json=$(jq --arg p "$stored" --arg a "$account" \
                 '. + [{stored_path:$p, account:$a}]' <<< "$links_json")
         else
@@ -1235,13 +1248,12 @@ _claude_acc_links_json() {
 # `links --json`'s own strict reader surfaces a malformed line as
 # `LINKS_STORE_INVALID`.
 _claude_links_accounts_for_dir() {
-    local dir="$1" line parsed stored account
+    local dir="$1" line
+    local -a _claude_acc_parsed_link
     [[ -f "$CLAUDE_SWITCH_LINKS" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
-        parsed=$(_claude_acc_parse_link_line_machine "$line") || continue
-        stored="${parsed%%$'\t'*}"
-        account="${parsed#*$'\t'}"
-        [[ "$stored" == "$dir" ]] && print -r -- "$account"
+        _claude_acc_parse_link_line_machine "$line" || continue
+        [[ "${_claude_acc_parsed_link[1]}" == "$dir" ]] && print -r -- "${_claude_acc_parsed_link[2]}"
     done < "$CLAUDE_SWITCH_LINKS"
 }
 
