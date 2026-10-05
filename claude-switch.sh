@@ -150,6 +150,7 @@ _claude_msg_en=(
     status_linked       "(linked to %s)"
     status_default      "(default)"
     status_standard     "Active account: ~/.claude/ (standard)"
+    status_json_required_for_path "claude-acc status --path requires --json."
     usage_header        "Claude Code usage:"
     usage_resets_in     "resets in %s"
     usage_available_now "available now"
@@ -303,6 +304,7 @@ _claude_msg_ru=(
     status_linked       "(привязан к %s)"
     status_default      "(по умолчанию)"
     status_standard     "Активный аккаунт: ~/.claude/ (стандартный)"
+    status_json_required_for_path "claude-acc status --path требует --json."
     usage_header        "Использование Claude Code:"
     usage_resets_in     "сброс через %s"
     usage_available_now "доступно сейчас"
@@ -606,7 +608,7 @@ _claude_acc_help() {
     _msg help_title
     echo ""
     _msg help_commands
-    echo "  claude-acc list              $(_msg help_list)"
+    echo "  claude-acc list [--json]     $(_msg help_list)"
     echo "  claude-acc add <name>        $(_msg help_add)"
     echo "  claude-acc login <name>      $(_msg help_login)"
     echo "  claude-acc remove <name>     $(_msg help_remove)"
@@ -614,9 +616,9 @@ _claude_acc_help() {
     echo "  claude-acc reset             $(_msg help_reset)"
     echo "  claude-acc link <name>       $(_msg help_link)"
     echo "  claude-acc unlink            $(_msg help_unlink)"
-    echo "  claude-acc links             $(_msg help_links)"
-    echo "  claude-acc status            $(_msg help_status)"
-    echo "  claude-acc usage             $(_msg help_usage)"
+    echo "  claude-acc links [--json]    $(_msg help_links)"
+    echo "  claude-acc status [--json] [--path <dir>]  $(_msg help_status)"
+    echo "  claude-acc usage [--json]    $(_msg help_usage)"
     echo "  claude-acc update            $(_msg help_update)"
     echo "  claude-acc run <name> [...]  $(_msg help_run)"
     echo "  claude-acc cloud <name> <task>    $(_msg help_cloud)"
@@ -629,7 +631,45 @@ _claude_acc_help() {
     echo "  claude-acc desktop add|clone-config|clone-runtime|list|run|remove [<name>]  $(_msg help_desktop)"
 }
 
+# A fixed-shape JSON error for a missing machine-mode dependency. Must not
+# itself depend on `jq` — `jq` may be exactly the dependency that is
+# missing, and the frozen contract requires one valid JSON document on
+# stdout even then. `dep` always comes from this file's own small internal
+# allow-list (security/curl/jq/shasum/date), never user-controlled, so a
+# plain `printf` template is safe — no value here ever needs JSON escaping.
+_claude_acc_machine_dependency_error() {
+    local dep="$1"
+    printf '{\n  "schema_version": 1,\n  "ok": false,\n  "error": {\n    "code": "DEPENDENCY_MISSING",\n    "message": "required machine-mode dependency is unavailable",\n    "details": {\n      "dependency": "%s"\n    }\n  }\n}\n' "$dep"
+    return 1
+}
+
+# Check every dependency in `$@` is on PATH; on the first missing one, print
+# the machine-safe error above and return 1 — never the pre-existing
+# localized `_msg ..._missing_dep` text, which is for the human command
+# path only and must never reach a `--json` caller's stdout. Must run
+# before any `jq`-based assembly starts.
+_claude_acc_require_machine_deps() {
+    local dep
+    for dep in "$@"; do
+        command -v "$dep" >/dev/null 2>&1 || { _claude_acc_machine_dependency_error "$dep"; return 1; }
+    done
+    return 0
+}
+
 _claude_acc_list() {
+    if [[ "${1:-}" == "--json" ]]; then
+        # `jq` is the only hard requirement: without it the JSON assembly
+        # itself cannot produce a document at all. `security`/`shasum`
+        # are not gated here — their absence (e.g. on Linux, where this
+        # script also runs in CI) already degrades gracefully to
+        # auth_present:false / token_changed_since_audit:false via the
+        # existing `[[ -z ... ]]` checks, which is a valid, correctly
+        # labeled JSON result, not a broken one.
+        _claude_acc_require_machine_deps jq || return 1
+        _claude_acc_list_json
+        return $?
+    fi
+
     local default_acc
     default_acc=$(_claude_default_account)
 
@@ -659,6 +699,84 @@ _claude_acc_list() {
         suffix=$(_claude_acc_default_suffix)
         echo "    ~/.claude/$suffix  $(_msg list_standard)"
     fi
+}
+
+# Build one `list --json` account entry (CM0.5) — mirrors account_entry in
+# src/commands/list.rs. `managed`/`is_default` are the literal JSON booleans
+# "true"/"false". `acc_name` is the chrome-lookup name ("default" for the
+# standard row, the account name otherwise).
+_claude_acc_list_entry_json() {
+    local name="$1" config_dir="$2" cache_path="$3" managed="$4" is_default="$5" acc_name="$6"
+
+    local auth_present="false"
+    [[ -n "$(_claude_acc_token "$config_dir")" ]] && auth_present="true"
+
+    local email="" uuid="" plan="" cached_hash=""
+    if [[ -f "$cache_path" ]]; then
+        email=$(jq -r '.email // empty' "$cache_path" 2>/dev/null)
+        uuid=$(jq -r '.uuid // empty' "$cache_path" 2>/dev/null)
+        plan=$(jq -r '.plan // empty' "$cache_path" 2>/dev/null)
+        cached_hash=$(jq -r '.token_hash // empty' "$cache_path" 2>/dev/null)
+    fi
+
+    local token_changed="false"
+    if [[ -n "$cached_hash" ]]; then
+        local current_hash
+        current_hash=$(_claude_acc_token_hash "$(_claude_acc_token "$config_dir")")
+        [[ -n "$current_hash" && "$cached_hash" != "$current_hash" ]] && token_changed="true"
+    fi
+
+    local chrome_json="null"
+    _claude_acc_chrome_enabled "$(_claude_acc_config_json "$acc_name")"
+    case $? in
+        0) chrome_json="true" ;;
+        1) chrome_json="false" ;;
+    esac
+
+    jq -n \
+        --arg name "$name" --argjson managed "$managed" --argjson is_default "$is_default" \
+        --argjson auth_present "$auth_present" \
+        --arg email "$email" --arg uuid "$uuid" --arg plan "$plan" \
+        --argjson token_changed "$token_changed" \
+        --argjson chrome "$chrome_json" --arg config_dir "$config_dir" \
+        '{name:$name, managed:$managed, default:$is_default, auth_present:$auth_present,
+          cached_email:(if $email == "" then null else $email end),
+          cached_uuid:(if $uuid == "" then null else $uuid end),
+          cached_plan:(if $plan == "" then null else $plan end),
+          token_changed_since_audit:$token_changed,
+          chrome_enabled:$chrome, config_dir:$config_dir}'
+}
+
+# `claude-acc list --json` (CM0.5) — docs/machine-api.md §1's fast local
+# account inventory. No live identity/profile request, same as the Rust
+# contract: every field comes from data already on disk.
+_claude_acc_list_json() {
+    local default_acc; default_acc=$(_claude_default_account)
+    local accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
+
+    local entries="[]"
+    local acc acc_dir is_default entry
+    for acc in "${accounts[@]}"; do
+        acc_dir="$CLAUDE_SWITCH_ACCOUNTS_DIR/$acc"
+        is_default="false"
+        [[ "$acc" == "$default_acc" ]] && is_default="true"
+        entry=$(_claude_acc_list_entry_json \
+            "$acc" "$acc_dir" "$(_claude_acc_cache_path "$acc_dir")" "true" "$is_default" "$acc")
+        entries=$(jq --argjson e "$entry" '. + [$e]' <<< "$entries")
+    done
+
+    # Same visibility rule as the human command: the standard row appears
+    # only once it has actually been used.
+    local std_dir std_cache
+    std_dir=$(_claude_acc_default_token_dir)
+    std_cache=$(_claude_acc_default_cache_path)
+    if [[ -n "$(_claude_acc_token "$std_dir")" || -f "$std_cache" ]]; then
+        entry=$(_claude_acc_list_entry_json "default" "$std_dir" "$std_cache" "false" "false" "default")
+        entries=$(jq --argjson e "$entry" '. + [$e]' <<< "$entries")
+    fi
+
+    jq -n --argjson accounts "$entries" '{schema_version: 1, ok: true, accounts: $accounts}'
+    return 0
 }
 
 # Keep inherited Claude credentials, provider selectors, and routing overrides
@@ -973,6 +1091,12 @@ _claude_acc_unlink() {
 }
 
 _claude_acc_links() {
+    if [[ "${1:-}" == "--json" ]]; then
+        _claude_acc_require_machine_deps jq || return 1
+        _claude_acc_links_json
+        return $?
+    fi
+
     if [[ ! -s "$CLAUDE_SWITCH_LINKS" ]]; then
         _msg links_empty
         return
@@ -996,7 +1120,294 @@ _claude_acc_links() {
     done
 }
 
+# Trim ASCII whitespace (space/tab) from both ends of `$1`. Used only by
+# the strict machine-mode link parser below, to match Rust's `str::trim()`
+# of the delimiter-adjacent padding in config.rs::parse_link_line — never
+# applied to meaningful whitespace inside a path or account value, since
+# this only ever runs on the two pieces already split off by `=`.
+_claude_acc_trim_whitespace() {
+    local s="$1"
+    while [[ "$s" == [[:space:]]* ]]; do
+        s="${s#?}"
+    done
+    while [[ "$s" == *[[:space:]] ]]; do
+        s="${s%?}"
+    done
+    print -r -- "$s"
+}
+
+# Strict machine-mode link-line parser — mirrors config.rs's
+# parse_link_line exactly: split on the FINAL `=` (so a stored path that
+# itself contains `=` characters still parses correctly, e.g.
+# "C:\repo=a=work" -> stored "C:\repo=a", account "work"), then trim
+# whitespace immediately touching the delimiter from each side.
+#
+# The parsed pair is never serialized back through a delimiter
+# character — a path may legitimately contain a TAB (or any other single
+# character this function might otherwise have picked as a sentinel),
+# and re-splitting a serialized "stored<X>account" string on `X` would
+# silently corrupt such a path. Instead, on success this assigns the
+# CALLER's `_claude_acc_parsed_link` array — zsh's dynamic scoping means
+# a name this function does not `local`-declare itself resolves to the
+# nearest enclosing scope that did, so the caller declares
+# `local -a _claude_acc_parsed_link` before calling this, and reads
+# `_claude_acc_parsed_link[1]`/`[2]` after a successful (0) return. On
+# failure (1) — the line has no `=` at all, or either trimmed side is
+# empty — the caller's array is left untouched and should not be read.
+#
+# This is the one parser both `links --json` and `status --json`'s
+# exact-path lookup use (see _claude_links_accounts_for_dir below), so
+# the two can never disagree about what a stored line means. Deliberately
+# separate from the pre-existing permissive human-mode parsing in
+# _claude_acc_links/_claude_dir_account, which this correction does not
+# touch — see .claude/rules/shell-parity.md.
+_claude_acc_parse_link_line_machine() {
+    local line="$1" stored account
+    [[ "$line" == *"="* ]] || return 1
+    stored=$(_claude_acc_trim_whitespace "${line%=*}")
+    account=$(_claude_acc_trim_whitespace "${line##*=}")
+    [[ -z "$stored" || -z "$account" ]] && return 1
+    _claude_acc_parsed_link=("$stored" "$account")
+}
+
+# `claude-acc links --json` (CM0.5) — docs/machine-api.md §3's stored
+# routing map plus a genuine whole-store conflict analysis. Unlike the human
+# command (which silently skips any line without `=`), a malformed line is
+# reported (`LINKS_STORE_INVALID`) rather than dropped from a map presented
+# as complete. Mirrors config.rs's read_links_strict / commands/links.rs.
+#
+# Ordering note: `links` preserves file order; `conflicts` groups by
+# stored_path (jq's `group_by`), so independent conflict groups come out in
+# path-sorted order rather than file-encounter order. Both are deterministic
+# — the contract requires every member preserved and no reordering *for
+# display by the consumer*, not a specific cross-implementation order
+# between this script and the Rust binary.
+_claude_acc_links_json() {
+    if [[ ! -f "$CLAUDE_SWITCH_LINKS" ]]; then
+        jq -n '{schema_version: 1, ok: false,
+                error: {code: "LINKS_STORE_UNREADABLE",
+                        message: "the links store could not be read", details: {}}}'
+        return 1
+    fi
+
+    local -a bad_lines
+    local line_no=0 line stored account
+    local -a _claude_acc_parsed_link
+    local links_json="[]"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        (( line_no++ ))
+        if _claude_acc_parse_link_line_machine "$line"; then
+            stored="${_claude_acc_parsed_link[1]}"
+            account="${_claude_acc_parsed_link[2]}"
+            links_json=$(jq --arg p "$stored" --arg a "$account" \
+                '. + [{stored_path:$p, account:$a}]' <<< "$links_json")
+        else
+            bad_lines+=("$line_no"$'\t'"$line")
+        fi
+    done < "$CLAUDE_SWITCH_LINKS"
+
+    if (( ${#bad_lines} > 0 )); then
+        local lines_json="[]" bl ln raw
+        for bl in "${bad_lines[@]}"; do
+            ln="${bl%%$'\t'*}"; raw="${bl#*$'\t'}"
+            lines_json=$(jq --argjson n "$ln" --arg raw "$raw" \
+                '. + [{line_number:$n, raw:$raw}]' <<< "$lines_json")
+        done
+        jq -n --argjson lines "$lines_json" \
+            '{schema_version: 1, ok: false,
+              error: {code: "LINKS_STORE_INVALID",
+                      message: "the links store contains one or more lines that could not be parsed",
+                      details: {lines: $lines}}}'
+        return 1
+    fi
+
+    local conflicts_json
+    conflicts_json=$(jq -c '
+        group_by(.stored_path)
+        | map(select((map(.account) | unique | length) >= 2))
+        | map({code: "AMBIGUOUS_EQUIVALENT_PATHS", mappings: .})
+    ' <<< "$links_json")
+
+    jq -n --argjson links "$links_json" --argjson conflicts "$conflicts_json" \
+        '{schema_version: 1, ok: true, links: $links, conflicts: $conflicts}'
+    return 0
+}
+
+# All accounts stored for the exact directory `$1`, one per output line.
+# Exact-string equivalence is this platform's whole path-identity relation
+# (see path_identity.rs's non-Windows branch), so this is both the lookup
+# and the ambiguity-detection building block: more than one distinct value
+# here for the same directory is an AMBIGUOUS_LINK.
+#
+# Uses the same strict parser `links --json` uses (trimmed, final-`=`
+# split), so `status --json` can never resolve a delimiter-padded line
+# differently than `links --json` reports it. A line that fails to parse
+# is silently skipped here, never an error — matching Rust's
+# `AppConfig::all_links`/`find_link` (used by `resolve::effective_route`),
+# which is permissive the same way the human command is; only
+# `links --json`'s own strict reader surfaces a malformed line as
+# `LINKS_STORE_INVALID`.
+_claude_links_accounts_for_dir() {
+    local dir="$1" line
+    local -a _claude_acc_parsed_link
+    [[ -f "$CLAUDE_SWITCH_LINKS" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        _claude_acc_parse_link_line_machine "$line" || continue
+        [[ "${_claude_acc_parsed_link[1]}" == "$dir" ]] && print -r -- "${_claude_acc_parsed_link[2]}"
+    done < "$CLAUDE_SWITCH_LINKS"
+}
+
+# `claude-acc status --json [--path <dir>]` (CM0.5) — docs/machine-api.md
+# §4's single routing authority. Mirrors resolve::effective_route /
+# commands/status.rs::run_json.
+_claude_acc_status_json() {
+    local query_path=""
+    if [[ "${1:-}" == "--path" ]]; then
+        query_path="$2"
+    fi
+    if [[ -z "$query_path" ]]; then
+        query_path="$PWD"
+    elif [[ "$query_path" != /* ]]; then
+        query_path="$PWD/$query_path"
+    fi
+
+    if [[ ! -e "$query_path" ]]; then
+        jq -n --arg qp "$query_path" \
+            '{schema_version: 1, ok: false,
+              error: {code: "PATH_NOT_FOUND",
+                      message: ("path does not exist: " + $qp), details: {}}}'
+        return 1
+    fi
+    if [[ ! -d "$query_path" ]]; then
+        jq -n --arg qp "$query_path" \
+            '{schema_version: 1, ok: false,
+              error: {code: "PATH_NOT_DIRECTORY",
+                      message: ("path is not a directory: " + $qp), details: {}}}'
+        return 1
+    fi
+
+    # `raw_accounts` is declared once, here, outside the loop below — zsh
+    # echoes "name=value" to stdout when a `local` re-declares a name that
+    # already exists in the same scope (the same trap this file's own
+    # human doctor code already comments on), and this loop can run many
+    # times per call. Caught only by actually running this under zsh:
+    # every ancestor-walk iteration past the first corrupted stdout with a
+    # stray "raw_accounts=..." line ahead of the JSON document.
+    local dir="$query_path" resolved="" source="" owning="" raw_accounts
+    while [[ "$dir" != "/" && -n "$dir" ]]; do
+        raw_accounts=$(_claude_links_accounts_for_dir "$dir")
+        # Guard on the raw string before splitting: zsh's `(f)` on an empty
+        # string yields a one-element array holding "", not a zero-element
+        # one — checked here rather than relied on, since getting this
+        # wrong would make every unlinked directory look "linked" to the
+        # empty account.
+        if [[ -n "$raw_accounts" ]]; then
+            local -a accounts_for_dir
+            accounts_for_dir=("${(@f)raw_accounts}")
+            # Distinct-account counting decides *whether* this is ambiguous
+            # — it must never decide *what gets reported*. Two stored
+            # entries naming the same account (e.g. two identical lines)
+            # are not themselves a conflict, but once a second, different
+            # account is also present, every matching stored entry is part
+            # of the mapping, including repeats — mirrors
+            # LinkResolveError::Ambiguous::mappings, which is exactly the
+            # unfiltered list `find_link` collected.
+            local -A seen=()
+            local -i distinct_count=0
+            local acct
+            for acct in "${accounts_for_dir[@]}"; do
+                if [[ -z "${seen[$acct]:-}" ]]; then
+                    seen[$acct]=1
+                    (( distinct_count++ ))
+                fi
+            done
+            if (( distinct_count > 1 )); then
+                local mappings="[]" a
+                for a in "${accounts_for_dir[@]}"; do
+                    mappings=$(jq --arg p "$dir" --arg a "$a" \
+                        '. + [{stored_path:$p, account:$a}]' <<< "$mappings")
+                done
+                jq -n --arg qp "$query_path" --argjson mappings "$mappings" \
+                    '{schema_version: 1, ok: false,
+                      error: {code: "AMBIGUOUS_LINK",
+                              message: "multiple accounts are linked to equivalent paths for this directory",
+                              details: {query_path: $qp, mappings: $mappings}}}'
+                return 1
+            fi
+            resolved="${accounts_for_dir[1]}"
+            source="linked"
+            owning="$dir"
+            break
+        fi
+        dir="${dir:h}"
+    done
+
+    if [[ -z "$resolved" ]]; then
+        local default_acc; default_acc=$(_claude_default_account)
+        if [[ -z "$default_acc" ]]; then
+            # No configured managed default at all — standard is the
+            # fallback with no routing layer having made a decision.
+            resolved="default"
+            source="standard"
+        elif [[ -d "$CLAUDE_SWITCH_ACCOUNTS_DIR/$default_acc" ]]; then
+            resolved="$default_acc"
+            source="default"
+        else
+            # A managed default IS configured, but its account directory
+            # no longer exists. The actual shim still falls back to
+            # standard — this is reporting parity, not a request to
+            # launch the stale account — but `source` must stay "default":
+            # the configured default was the routing layer that made the
+            # (now-unusable) decision, same as src/resolve.rs::
+            # effective_route's `Some(_stale)` case, which is `source:
+            # Default`, never `Standard`. Collapsing this into "standard"
+            # would claim no default was ever configured at all.
+            resolved="default"
+            source="default"
+        fi
+    elif [[ "$resolved" == "default" || ! -d "$CLAUDE_SWITCH_ACCOUNTS_DIR/$resolved" ]]; then
+        # A link to the literal "default", or to a managed account that no
+        # longer exists, falls back to the standard account — the same
+        # effective-routing rule src/resolve.rs::effective_route applies.
+        # `source` stays "linked": the link is what decided this, even
+        # though its target turned out to be unusable.
+        resolved="default"
+    fi
+
+    jq -n --arg qp "$query_path" --arg acc "$resolved" --arg src "$source" --arg owning "$owning" \
+        '{schema_version: 1, ok: true, query_path: $qp, resolved_account: $acc,
+          source: $src, owning_link_path: (if $owning == "" then null else $owning end)}'
+    return 0
+}
+
 _claude_acc_status() {
+    # NOT named `path` — that is zsh's special, tied-to-$PATH array, and
+    # shadowing it with a scalar `local` here would break every PATH-based
+    # command lookup (`jq`, `security`, ...) for the rest of this function
+    # and everything it calls, dynamically-scoped, for the duration of the
+    # call. Caught by actually running this under zsh, not by inspection.
+    local json=0 path_arg="" args=("$@") i=1
+    while (( i <= ${#args} )); do
+        case "${args[$i]}" in
+            --json) json=1 ;;
+            --path) (( i++ )); path_arg="${args[$i]:-}" ;;
+        esac
+        (( i++ ))
+    done
+    if (( json )); then
+        _claude_acc_require_machine_deps jq || return 1
+        if [[ -n "$path_arg" ]]; then
+            _claude_acc_status_json --path "$path_arg"
+        else
+            _claude_acc_status_json
+        fi
+        return $?
+    fi
+    if [[ -n "$path_arg" ]]; then
+        _msg status_json_required_for_path
+        return 1
+    fi
+
     local account source_info linked_dir
 
     linked_dir=$(_claude_find_linked_dir)
@@ -2096,7 +2507,150 @@ _claude_acc_usage_lines() {
     done <<< "$out"
 }
 
+# Format Unix epoch seconds as an ISO-8601 UTC timestamp. BSD `date`
+# (shipped on macOS, this script's target platform) accepts `-r <epoch>`
+# for this; GNU `date` would need `-d @<epoch>` instead.
+_claude_acc_epoch_to_iso8601() {
+    date -u -r "$1" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null
+}
+
+# Fetch usage for a token, preserving the raw `{utilization, resets_at}`
+# shape — unlike _claude_acc_usage_fetch, which converts `resets_at` into a
+# remaining-seconds countdown for the human renderer and so cannot be
+# reused for the machine contract's verbatim `resets_at` field. Prints
+# `{"five_hour":...,"seven_day":...}` or empty on failure/offline.
+_claude_acc_usage_fetch_json() {
+    local token="$1"
+    [[ -z "$token" ]] && return 1
+    curl -sf --max-time 5 \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        https://api.anthropic.com/api/oauth/usage 2>/dev/null \
+        | jq -c '{five_hour: (.five_hour // null), seven_day: (.seven_day // null)}' 2>/dev/null
+}
+
+# Claude Code's own last reading for a config dir, raw shape — the JSON
+# counterpart of _claude_acc_usage_cached. Prints
+# "<fetched_at_secs>\t<raw JSON object text>" or empty if there is nothing
+# usable, or it is not identity-matched (see _claude_acc_usage_cached for
+# why that match is required).
+_claude_acc_usage_cached_json() {
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    jq -r '
+        .cachedUsageUtilization as $c
+        | select($c != null)
+        | select(($c.accountUuid // null) == (.oauthAccount.accountUuid // null))
+        | select(($c.fetchedAtMs // null) != null)
+        | $c.utilization as $u
+        | select(($u.five_hour // null) != null or ($u.seven_day // null) != null)
+        | "\(($c.fetchedAtMs / 1000) | floor)\t\({five_hour: ($u.five_hour // null), seven_day: ($u.seven_day // null)} | tostring)"
+    ' "$f" 2>/dev/null
+}
+
+# Apply the same "a window whose reset has already passed is omitted"
+# suppression commands/usage.rs's window_json applies — but only when
+# `suppress` is 1, matching that the Rust side only applies it to *cached*
+# readings, never live ones (the human form's existing behaviour). `window`
+# is a `{"utilization":...,"resets_at":...}` object text, or "null".
+_claude_acc_usage_suppress_expired() {
+    local window="$1" suppress="$2" now
+    [[ "$window" == "null" || -z "$window" ]] && { echo "null"; return; }
+    (( ! suppress )) && { echo "$window"; return; }
+    now=$(date +%s)
+    jq -c --argjson now "$now" '
+        if (.resets_at // null) == null then .
+        else
+            (.resets_at | sub("\\.[0-9]+"; "") | sub("Z$"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "")
+             | strptime("%Y-%m-%dT%H:%M:%S") | mktime) as $target
+            | if ($target - $now) <= 0 then null else . end
+        end
+    ' <<< "$window" 2>/dev/null
+}
+
+# Build one `usage --json` account entry — mirrors usage_entry_json in
+# src/commands/usage.rs. `name` doubles as the chrome/lock-style lookup key
+# ("default" for the standard row, the account name otherwise).
+_claude_acc_usage_entry_json() {
+    local name="$1" token_dir="$2"
+    local token; token=$(_claude_acc_token "$token_dir")
+    local source="" fetched_at="" five="null" seven="null"
+
+    # Mirrors identity::fetch_account_usage_detail exactly: with no token,
+    # the cache is never consulted — a no-token config dir is "unavailable",
+    # full stop, the same as the human usage command's NoToken state. The
+    # cache is a last resort for a *live request that failed*, never a
+    # substitute for a token that was never there to try with.
+    if [[ -n "$token" ]]; then
+        local live; live=$(_claude_acc_usage_fetch_json "$token")
+        if [[ -n "$live" ]]; then
+            source="live"
+            fetched_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            five=$(_claude_acc_usage_suppress_expired "$(jq -c '.five_hour // null' <<< "$live")" 0)
+            seven=$(_claude_acc_usage_suppress_expired "$(jq -c '.seven_day // null' <<< "$live")" 0)
+        else
+            local cached; cached=$(_claude_acc_usage_cached_json "$(_claude_acc_config_json "$name")")
+            if [[ -n "$cached" ]]; then
+                source="cache"
+                local fetched_secs raw
+                fetched_secs="${cached%%$'\t'*}"
+                raw="${cached#*$'\t'}"
+                fetched_at=$(_claude_acc_epoch_to_iso8601 "$fetched_secs")
+                five=$(_claude_acc_usage_suppress_expired "$(jq -c '.five_hour // null' <<< "$raw")" 1)
+                seven=$(_claude_acc_usage_suppress_expired "$(jq -c '.seven_day // null' <<< "$raw")" 1)
+            fi
+        fi
+    fi
+
+    [[ -z "$source" ]] && source="unavailable"
+
+    jq -n \
+        --arg name "$name" --arg source "$source" --arg fetched_at "$fetched_at" \
+        --argjson five "$five" --argjson seven "$seven" \
+        '{name:$name, source:$source,
+          fetched_at:(if $fetched_at == "" then null else $fetched_at end),
+          five_hour:$five, seven_day:$seven}'
+}
+
+# `claude-acc usage --json` (CM0.5) — docs/machine-api.md §5's
+# informational, non-authoritative usage data. No `plan` field (that stays
+# owned by `list --json`/`doctor --json`); never gates anything.
+_claude_acc_usage_json() {
+    local accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
+    local entries="[]"
+    local acc acc_dir entry
+    for acc in "${accounts[@]}"; do
+        acc_dir="$CLAUDE_SWITCH_ACCOUNTS_DIR/$acc"
+        entry=$(_claude_acc_usage_entry_json "$acc" "$acc_dir")
+        entries=$(jq --argjson e "$entry" '. + [$e]' <<< "$entries")
+    done
+
+    # Same account-universe/visibility rule as list --json (token present OR
+    # an existing cache), not the human usage command's token-only check —
+    # so the GUI can join the two by name deterministically.
+    local std_dir std_cache
+    std_dir=$(_claude_acc_default_token_dir)
+    std_cache=$(_claude_acc_default_cache_path)
+    if [[ -n "$(_claude_acc_token "$std_dir")" || -f "$std_cache" ]]; then
+        entry=$(_claude_acc_usage_entry_json "default" "$std_dir")
+        entries=$(jq --argjson e "$entry" '. + [$e]' <<< "$entries")
+    fi
+
+    jq -n --argjson accounts "$entries" '{schema_version: 1, ok: true, accounts: $accounts}'
+    return 0
+}
+
 _claude_acc_usage() {
+    if [[ "${1:-}" == "--json" ]]; then
+        # Only `jq` is hard-gated — see the comment in _claude_acc_list.
+        # `curl`/`security`/`date` missing degrades to a live fetch/cache
+        # read that fails the same way "offline"/"no network" already
+        # does: `source: "unavailable"`, still a valid document.
+        _claude_acc_require_machine_deps jq || return 1
+        _claude_acc_usage_json
+        return $?
+    fi
+
     local dep
     for dep in security curl jq shasum; do
         if ! command -v "$dep" >/dev/null 2>&1; then
@@ -2479,13 +3033,25 @@ _claude_acc_doctor() {
         shift
     fi
 
-    local dep
-    for dep in security curl jq shasum; do
-        if ! command -v "$dep" >/dev/null 2>&1; then
-            _msg doctor_missing_dep "$dep"
-            return 1
-        fi
-    done
+    if (( json )); then
+        # Machine-safe check first: `--json` must never reach the
+        # localized, human-text `doctor_missing_dep` path below, whose
+        # output would violate the one-JSON-document stdout contract.
+        # Only `jq` is hard-gated, same reasoning as _claude_acc_list/
+        # _claude_acc_usage: `curl`/`security`/`shasum` missing degrades
+        # every row to "offline"/"no_token", which is still a valid
+        # document, not a broken one — and this command's own test suite
+        # runs on Linux CI, where `security`/`shasum` do not exist at all.
+        _claude_acc_require_machine_deps jq || return 1
+    else
+        local dep
+        for dep in security curl jq shasum; do
+            if ! command -v "$dep" >/dev/null 2>&1; then
+                _msg doctor_missing_dep "$dep"
+                return 1
+            fi
+        done
+    fi
 
     local accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
     local standard_label="~/.claude/"
@@ -2649,6 +3215,64 @@ _claude_acc_doctor() {
     return 1
 }
 
+# "lock_state<TAB>pinned_uuid" for an account/standard name — the same two
+# facts Rust's commands/lock.rs json_state reports for doctor --json.
+# pinned_uuid is empty (-> null) when there is no readable pin.
+_claude_acc_json_lock_fields() {
+    local acc_name="$1" lock_file id_file state pinned line rc
+    { read -r lock_file; read -r id_file } < <(_claude_acc_lock_paths "$acc_name")
+    state=$(_claude_acc_lock_state "$acc_name")
+    pinned=""
+    line=$(_claude_acc_read_lock "$lock_file"); rc=$?
+    (( rc == 0 )) && pinned="${line%%$'\t'*}"
+    printf '%s\t%s' "$state" "$pinned"
+}
+
+# Build one doctor --json row — CM0.5's additive `lock`/`pinned_uuid`/
+# `chrome_enabled`/`config_dir` fields alongside the pre-existing
+# `name`/`status`/`email`/`uuid`/`plan`, mirroring build_entry/
+# add_lock_fields/add_machine_fields in src/commands/doctor.rs.
+# `is_default` is "true"/"false", or "" to omit the field entirely (used for
+# the standard row, which never carries one). `acc_name` is the lock/chrome
+# lookup name ("default" for standard, the account name otherwise).
+_claude_acc_doctor_entry_json() {
+    # Second parameter is NOT named `status` — that is zsh's special,
+    # read-only-as-a-fresh-local alias for `$?`; `local status=...` fails
+    # outright ("read-only variable: status"), caught only by actually
+    # running this under zsh. `entry_status` still becomes the JSON field
+    # named "status" below — only the shell-side name changes.
+    local name="$1" entry_status="$2" email="$3" uuid="$4" plan="$5" config_dir="$6"
+    local is_default="$7" acc_name="$8"
+
+    local lock_fields lock pinned
+    lock_fields=$(_claude_acc_json_lock_fields "$acc_name")
+    lock="${lock_fields%%$'\t'*}"
+    pinned="${lock_fields#*$'\t'}"
+
+    local chrome_json="null"
+    _claude_acc_chrome_enabled "$(_claude_acc_config_json "$acc_name")"
+    case $? in
+        0) chrome_json="true" ;;
+        1) chrome_json="false" ;;
+    esac
+
+    jq -n \
+        --arg name "$name" --arg status "$entry_status" \
+        --arg email "$email" --arg uuid "$uuid" --arg plan "$plan" \
+        --arg lock "$lock" --arg pinned "$pinned" \
+        --argjson chrome "$chrome_json" --arg config_dir "$config_dir" \
+        --arg is_default "$is_default" \
+        '{name:$name, status:$status,
+          email:(if $email == "" then null else $email end),
+          uuid:(if $uuid == "" then null else $uuid end),
+          plan:(if $plan == "" then null else $plan end),
+          lock:$lock,
+          pinned_uuid:(if $pinned == "" then null else $pinned end),
+          chrome_enabled:$chrome,
+          config_dir:$config_dir}
+         + (if $is_default == "" then {} else {default: ($is_default == "true")} end)'
+}
+
 # JSON form of `doctor`. Last positional arg is the standard_present flag (0/1);
 # preceding args are managed-account names. Schema matches the Rust binary —
 # see src/commands/doctor.rs.
@@ -2680,24 +3304,22 @@ _claude_acc_doctor_json() {
                     "$email" "$uuid" "$org" "$token" "$plan"
             fi
         fi
-        is_default=false
-        [[ "$acc" == "$default_acc" ]] && is_default=true
-        entry=$(jq -n \
-            --arg name "$acc" --arg status "$audit_status" \
-            --arg email "$email" --arg uuid "$uuid" --arg plan "$plan" \
-            --argjson is_default "$is_default" \
-            '{name:$name, status:$status,
-              email:(if $email == "" then null else $email end),
-              uuid:(if $uuid == "" then null else $uuid end),
-              plan:(if $plan == "" then null else $plan end),
-              default:$is_default}')
+        is_default="false"
+        [[ "$acc" == "$default_acc" ]] && is_default="true"
+        entry=$(_claude_acc_doctor_entry_json \
+            "$acc" "$audit_status" "$email" "$uuid" "$plan" "$acc_dir" "$is_default" "$acc")
+        [[ "$(jq -r '.lock' <<< "$entry")" == "drift" ]] && any_problem=1
         entries=$(jq --argjson e "$entry" '. + [$e]' <<< "$entries")
     done
 
-    local standard="null"
+    # The standard row appears whenever it has a token (as before) OR — for
+    # parity with the Rust side — its pin alone has something to report: a
+    # lock finding on an account nobody can currently audit must not be
+    # swallowed just because there is no token right now.
+    local standard="null" standard_lock_state
+    standard_lock_state=$(_claude_acc_lock_state "default")
     if (( standard_present )); then
-        token=$(_claude_acc_token "$standard_dir" 2>/dev/null) || \
-            token=$(_claude_acc_token "$(_claude_acc_default_token_dir)")
+        token=$(_claude_acc_token "$(_claude_acc_default_token_dir)")
         identity=$(_claude_acc_identity "$token")
         if [[ -z "$identity" ]]; then
             audit_status="offline"; email=""; uuid=""; plan=""
@@ -2708,17 +3330,19 @@ _claude_acc_doctor_json() {
             _claude_acc_write_cache "$(_claude_acc_default_cache_path)" \
                 "$email" "$uuid" "$org" "$token" "$plan"
         fi
-        standard=$(jq -n \
-            --arg name "~/.claude/" --arg status "$audit_status" \
-            --arg email "$email" --arg uuid "$uuid" --arg plan "$plan" \
-            '{name:$name, status:$status,
-              email:(if $email == "" then null else $email end),
-              uuid:(if $uuid == "" then null else $uuid end),
-              plan:(if $plan == "" then null else $plan end)}')
+        standard=$(_claude_acc_doctor_entry_json \
+            "~/.claude/" "$audit_status" "$email" "$uuid" "$plan" \
+            "$(_claude_acc_default_token_dir)" "" "default")
+        [[ "$(jq -r '.lock' <<< "$standard")" == "drift" ]] && any_problem=1
+    elif [[ "$standard_lock_state" != "none" ]]; then
+        standard=$(_claude_acc_doctor_entry_json \
+            "~/.claude/" "no_token" "" "" "" \
+            "$(_claude_acc_default_token_dir)" "" "default")
+        [[ "$standard_lock_state" == "drift" ]] && any_problem=1
     fi
 
     jq -n --argjson accounts "$entries" --argjson standard "$standard" \
-        '{accounts:$accounts, standard:$standard}'
+        '{schema_version: 1, ok: true, accounts:$accounts, standard:$standard}'
     return $any_problem
 }
 
@@ -2761,7 +3385,7 @@ claude-acc() {
         lock)    _claude_acc_lock "$@" ;;
         link)    _claude_acc_link "$@" ;;
         unlink)  _claude_acc_unlink "$@" ;;
-        links)   _claude_acc_links ;;
+        links)   _claude_acc_links "$@" ;;
         status)  _claude_acc_status "$@" ;;
         usage)   _claude_acc_usage "$@" ;;
         update)  _claude_acc_update "$@" ;;
@@ -2809,9 +3433,33 @@ _claude_acc_completion() {
         "help:$(_msg help_help)"
     )
 
+    local cmd="${words[2]}" cur="${words[CURRENT]}" prev="${words[CURRENT-1]}"
+
     if (( CURRENT == 2 )); then
         _describe 'command' subcmds
-    elif (( CURRENT == 3 )); then
+        return
+    fi
+
+    # `status --path <TAB>` — directory completion for the flag's value,
+    # the same as the Rust CLI's completion in shell/init.zsh.
+    if [[ "$cmd" == status && "$prev" == --path ]]; then
+        _files -/
+        return
+    fi
+
+    # Machine API flags — covers the five --json commands (CM0.5); only
+    # `status` also takes --path.
+    if [[ "$cur" == -* ]]; then
+        local -a flags
+        case "$cmd" in
+            list|links|usage|doctor) flags=('--json:Output as JSON') ;;
+            status) flags=('--json:Output as JSON' '--path:Directory to resolve instead of the current one (requires --json)') ;;
+        esac
+        (( ${#flags} )) && _describe 'option' flags
+        return
+    fi
+
+    if (( CURRENT == 3 )); then
         case "${words[2]}" in
             remove|clone-settings)
                 accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))

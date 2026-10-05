@@ -68,7 +68,7 @@ claude-acc link work
 | Command | Description |
 | --- | --- |
 | `claude-acc` | Help |
-| `claude-acc list` | List all accounts |
+| `claude-acc list [--json]` | List all accounts |
 | `claude-acc add <name>` | Add account (runs `claude login`); add `-s` / `--seed` to seed from `~/.claude/` |
 | `claude-acc clone-settings <name>` | Copy `settings.json` / `CLAUDE.md` / `agents/` / `plugins/` / etc. from `~/.claude/` into an existing account |
 | `claude-acc import <name> <path>` | Adopt an existing config dir as an account (no re-login); `--move` to relocate |
@@ -78,9 +78,9 @@ claude-acc link work
 | `claude-acc reset` | Reset default to `~/.claude/` |
 | `claude-acc link <name>` | Link account to current directory |
 | `claude-acc unlink` | Unlink current directory |
-| `claude-acc links` | Show all directory links |
-| `claude-acc status` | Show active account |
-| `claude-acc usage` | Show 5h / 7d rate-limit usage for every account |
+| `claude-acc links [--json]` | Show all directory links |
+| `claude-acc status [--json] [--path <dir>]` | Show active account |
+| `claude-acc usage [--json]` | Show 5h / 7d rate-limit usage for every account |
 | `claude-acc sessions [--all]` | List Claude Code sessions across accounts (current directory by default) |
 | `claude-acc session copy <id\|name> --to <name>` | Copy a session into another account so `claude --resume` can see it |
 | `claude-acc resume-hook [on\|off]` | Show/set whether plain `claude --resume <id>` gets the same check |
@@ -168,6 +168,7 @@ The README is the overview. Each topic has its own page:
 | Show the active account in Claude Code's status bar | [Status line](docs/statusline.md) |
 | Start cloud work or bring a cloud session into the terminal under a selected account | [Cloud sessions and teleport](docs/cloud.md) |
 | See how this compares to cswap, aisw and the direnv recipe | [Comparison with other tools](docs/comparison.md) |
+| Script or build a GUI against `list`/`doctor`/`status`/`links`/`usage --json` | [Machine API](docs/machine-api.md) |
 
 ## Language
 

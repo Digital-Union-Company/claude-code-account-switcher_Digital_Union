@@ -1,6 +1,9 @@
+use serde_json::{Value, json};
+
 use crate::config::AppConfig;
 use crate::i18n::{self, I18n, Msg};
-use crate::identity::{self, CachedInfo, Usage, UsageResult, UsageWindow};
+use crate::identity::{self, CachedInfo, Usage, UsageResult, UsageSource, UsageWindow};
+use crate::machine;
 
 const BAR_WIDTH: usize = 20;
 
@@ -41,6 +44,89 @@ pub fn run(config: &AppConfig, i18n: &I18n) {
             print_result(identity::fetch_account_usage(dir), i18n, "~/.claude/");
         }
     }
+}
+
+/// `claude-acc usage --json` — docs/machine-api.md §5's informational,
+/// non-authoritative usage data. Carries no `plan` (that stays owned by
+/// `list --json`/`doctor --json`), and never gates anything — a slow or
+/// failing fetch degrades to `"unavailable"`, never blocks.
+pub fn run_json(config: &AppConfig) -> i32 {
+    let accounts = match config.list_accounts() {
+        Ok(v) => v,
+        Err(e) => return machine::error("CONFIG_STORE_UNREADABLE", &e.to_string(), json!({})),
+    };
+
+    // Same account-universe/visibility rule as `list --json`, so the GUI can
+    // join the two by name deterministically.
+    let standard = identity::standard_token_dir();
+    let standard_logged_in = standard
+        .as_deref()
+        .and_then(identity::current_token_hash)
+        .is_some()
+        || identity::read_cache_at(&identity::default_cache_path(&config.base_dir)).is_some();
+
+    let mut entries: Vec<Value> = accounts
+        .iter()
+        .map(|acc| {
+            let dir = config.account_path(acc);
+            usage_entry_json(acc, identity::fetch_account_usage_detail(&dir))
+        })
+        .collect();
+
+    if standard_logged_in && let Some(dir) = standard.as_deref() {
+        entries.push(usage_entry_json(
+            crate::sessions::DEFAULT_LABEL,
+            identity::fetch_account_usage_detail(dir),
+        ));
+    }
+
+    machine::success(json!({ "accounts": entries }))
+}
+
+/// Build one `accounts[]` entry from an already-obtained `UsageSource` — the
+/// decision half of `run_json`, kept separate from the I/O that produces a
+/// `UsageSource` (network/keychain/filesystem) so it is directly testable
+/// with hand-built fixtures instead of a real token.
+fn usage_entry_json(name: &str, source: UsageSource) -> Value {
+    match source {
+        UsageSource::Live(usage, fetched_at) => json!({
+            "name": name,
+            "source": "live",
+            "fetched_at": identity::epoch_to_iso8601(fetched_at),
+            "five_hour": window_json(&usage.five_hour, /* suppress_expired */ false),
+            "seven_day": window_json(&usage.seven_day, /* suppress_expired */ false),
+        }),
+        UsageSource::Cache(usage, fetched_at) => json!({
+            "name": name,
+            "source": "cache",
+            "fetched_at": identity::epoch_to_iso8601(fetched_at),
+            // Matches the human form's print_cached_usage: a cached window
+            // whose reset has already passed is omitted rather than shown
+            // as current (machine-api.md §5/§20).
+            "five_hour": window_json(&usage.five_hour, /* suppress_expired */ true),
+            "seven_day": window_json(&usage.seven_day, /* suppress_expired */ true),
+        }),
+        UsageSource::Unavailable => json!({
+            "name": name,
+            "source": "unavailable",
+            "fetched_at": null,
+            "five_hour": null,
+            "seven_day": null,
+        }),
+    }
+}
+
+/// `{"utilization": .., "resets_at": ..}` for a present window, `null` for
+/// an absent one — and, when `suppress_expired`, also `null` for a window
+/// whose `resets_at` has already passed (never presented as current).
+fn window_json(window: &Option<UsageWindow>, suppress_expired: bool) -> Value {
+    let Some(window) = window else {
+        return Value::Null;
+    };
+    if suppress_expired && has_reset(window) {
+        return Value::Null;
+    }
+    json!({ "utilization": window.utilization, "resets_at": window.resets_at })
 }
 
 fn print_result(result: UsageResult, i18n: &I18n, name: &str) {
@@ -235,5 +321,98 @@ mod tests {
     fn a_window_without_a_usable_reset_is_not_treated_as_reset() {
         assert!(!has_reset(&window(None)));
         assert!(!has_reset(&window(Some("not a timestamp"))));
+    }
+
+    // --- window_json / usage_entry_json (the --json formatting decision) ---
+
+    #[test]
+    fn window_json_is_null_for_an_absent_window() {
+        assert_eq!(window_json(&None, false), serde_json::Value::Null);
+        assert_eq!(window_json(&None, true), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn window_json_passes_a_present_window_through_as_is() {
+        let w = Some(window(Some("2099-01-01T00:00:00Z")));
+        assert_eq!(
+            window_json(&w, false),
+            serde_json::json!({"utilization": 97.0, "resets_at": "2099-01-01T00:00:00Z"})
+        );
+    }
+
+    #[test]
+    fn window_json_suppresses_an_expired_window_only_when_asked_to() {
+        let expired = Some(window(Some("2020-01-01T00:00:00Z")));
+        assert_eq!(window_json(&expired, true), serde_json::Value::Null);
+        // Live results are not suppressed — matching the human form, which
+        // only ever suppresses a *cached* reading's stale window.
+        assert_ne!(window_json(&expired, false), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn usage_entry_json_live_carries_no_plan_field_and_formats_fetched_at() {
+        let usage = Usage {
+            five_hour: Some(window(Some("2099-01-01T00:00:00Z"))),
+            seven_day: None,
+        };
+        let entry = usage_entry_json("work", UsageSource::Live(usage, 0));
+        assert_eq!(entry["name"], "work");
+        assert_eq!(entry["source"], "live");
+        assert_eq!(entry["fetched_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(entry["seven_day"], serde_json::Value::Null);
+        assert!(entry.get("plan").is_none(), "{entry:?}");
+    }
+
+    #[test]
+    fn usage_entry_json_cache_suppresses_an_expired_window() {
+        let usage = Usage {
+            five_hour: Some(window(Some("2020-01-01T00:00:00Z"))),
+            seven_day: Some(window(Some("2099-01-01T00:00:00Z"))),
+        };
+        let entry = usage_entry_json("work", UsageSource::Cache(usage, 0));
+        assert_eq!(entry["source"], "cache");
+        assert_eq!(entry["five_hour"], serde_json::Value::Null);
+        assert_ne!(entry["seven_day"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn usage_entry_json_unavailable_has_every_data_field_null() {
+        let entry = usage_entry_json("work", UsageSource::Unavailable);
+        assert_eq!(entry["source"], "unavailable");
+        assert_eq!(entry["fetched_at"], serde_json::Value::Null);
+        assert_eq!(entry["five_hour"], serde_json::Value::Null);
+        assert_eq!(entry["seven_day"], serde_json::Value::Null);
+    }
+
+    // --- run_json (filesystem-only path: no token anywhere in these fixtures) ---
+
+    fn run_json_scratch(tag: &str) -> AppConfig {
+        let dir = std::env::temp_dir().join(format!("cc-usage-json-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = AppConfig { base_dir: dir };
+        config.init().unwrap();
+        config
+    }
+
+    // The standard ~/.claude/ row, when it appears, always refers to the
+    // real machine's home directory — there is no scratch-dir equivalent —
+    // so this only asserts the exit code, which holds either way.
+    #[test]
+    fn run_json_succeeds_with_no_managed_accounts() {
+        let config = run_json_scratch("empty");
+        assert_eq!(run_json(&config), 0);
+        let _ = std::fs::remove_dir_all(&config.base_dir);
+    }
+
+    #[test]
+    fn run_json_reports_unavailable_for_a_managed_account_with_no_token() {
+        let config = run_json_scratch("no-token");
+        std::fs::create_dir_all(config.account_path("work")).unwrap();
+        assert_eq!(
+            run_json(&config),
+            0,
+            "an unavailable reading is still a successful enumeration"
+        );
+        let _ = std::fs::remove_dir_all(&config.base_dir);
     }
 }

@@ -42,28 +42,31 @@ struct ShimTarget {
     resume_dir: Option<PathBuf>,
 }
 
-/// Apply the existing cwd resolver and the same missing-account fallback as
-/// shell activation: a valid named account selects its managed directory;
-/// `default`, no mapping, or a stale mapping selects upstream default state.
+/// Apply the shared `resolve::effective_route` decision — the same one
+/// `status --json` reports — so the shim's actual routing and what
+/// ClaudeManagerPS's preflight check believes can never silently diverge
+/// (docs/machine-api.md's `status --json` routing-authority requirement).
+/// A valid named account selects its managed directory; `default`, no
+/// mapping, or a stale mapping selects upstream default state.
 #[cfg(any(windows, test))]
 fn target_for_cwd(
     config: &AppConfig,
     cwd: &Path,
 ) -> Result<ShimTarget, crate::config::LinkResolveError> {
-    let target = match crate::resolve::resolve_account(config, cwd)? {
-        Some(name) if name != crate::sessions::DEFAULT_LABEL && config.account_exists(&name) => {
-            let dir = config.account_path(&name);
-            ShimTarget {
-                profile: ClaudeProfile::Named(dir.clone()),
-                label: name,
-                resume_dir: Some(dir),
-            }
+    let route = crate::resolve::effective_route(config, cwd)?;
+    let target = if route.resolved_account != crate::sessions::DEFAULT_LABEL {
+        let dir = config.account_path(&route.resolved_account);
+        ShimTarget {
+            profile: ClaudeProfile::Named(dir.clone()),
+            label: route.resolved_account,
+            resume_dir: Some(dir),
         }
-        _ => ShimTarget {
+    } else {
+        ShimTarget {
             profile: ClaudeProfile::Default,
             label: crate::sessions::DEFAULT_LABEL.to_string(),
             resume_dir: crate::identity::standard_token_dir(),
-        },
+        }
     };
     Ok(target)
 }
@@ -273,6 +276,46 @@ mod tests {
             ClaudeProfile::Named(config.account_path("work"))
         );
         assert_eq!(target.label, "work");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // The shared-helper requirement itself: whatever `effective_route`
+    // reports as `resolved_account` is exactly what the shim will launch —
+    // across every case `status --json` distinguishes, not just the ones
+    // this file's own fixtures happen to cover.
+    #[test]
+    fn shim_target_always_agrees_with_the_shared_effective_route() {
+        let (root, config) = scratch("shim-route-parity");
+        let linked = root.join("linked");
+        let stale_link = root.join("stale-link");
+        let defaulted = root.join("defaulted");
+        let standard = root.join("standard");
+        for dir in [&linked, &stale_link, &defaulted, &standard] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(config.account_path("personal2")).unwrap();
+        fs::create_dir_all(config.account_path("work")).unwrap();
+        config
+            .set_link(linked.to_str().unwrap(), "personal2")
+            .unwrap();
+        config
+            .set_link(stale_link.to_str().unwrap(), "missing-account")
+            .unwrap();
+        config.set_default("work").unwrap();
+
+        for dir in [&linked, &stale_link, &defaulted] {
+            let route = crate::resolve::effective_route(&config, dir).unwrap();
+            let target = target_for_cwd(&config, dir).unwrap();
+            assert_eq!(target.label, route.resolved_account, "{dir:?}");
+        }
+
+        // `standard` has no link and (once `work` is cleared) no default.
+        config.clear_default().unwrap();
+        let route = crate::resolve::effective_route(&config, &standard).unwrap();
+        let target = target_for_cwd(&config, &standard).unwrap();
+        assert_eq!(target.label, route.resolved_account);
+        assert_eq!(route.resolved_account, crate::sessions::DEFAULT_LABEL);
+
         let _ = fs::remove_dir_all(root);
     }
 

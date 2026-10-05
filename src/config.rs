@@ -77,6 +77,26 @@ fn parse_link_line(line: &str) -> Option<(String, String)> {
     Some((directory.to_string(), account.to_string()))
 }
 
+/// A line of the `links` file that `parse_link_line` could not make sense
+/// of — 1-indexed so it matches what a human opening the file in an editor
+/// sees, plus the exact raw text so the caller can show it without a second
+/// file read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedLinkLine {
+    pub line_number: usize,
+    pub raw: String,
+}
+
+/// The outcome of reading the `links` file without the human command's
+/// silent-skip behaviour (`all_links`/`parse_link_line`'s `filter_map`):
+/// every line either parses, or the read as a whole reports exactly which
+/// lines did not — never a partial map presented as complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrictLinksRead {
+    Ok(Vec<(String, String)>),
+    Malformed(Vec<MalformedLinkLine>),
+}
+
 impl AppConfig {
     pub fn new() -> Self {
         let home = dirs::home_dir().expect("Cannot determine home directory");
@@ -206,6 +226,30 @@ impl AppConfig {
     pub fn all_links(&self) -> io::Result<Vec<(String, String)>> {
         let content = fs::read_to_string(self.links_path())?;
         Ok(content.lines().filter_map(parse_link_line).collect())
+    }
+
+    /// `all_links`, but surfacing every unparsable line instead of silently
+    /// dropping it (`links --json`'s `LINKS_STORE_INVALID` case) — the
+    /// human `links` command keeps the permissive behaviour unchanged, this
+    /// is a separate, stricter read for the machine contract only.
+    pub fn read_links_strict(&self) -> io::Result<StrictLinksRead> {
+        let content = fs::read_to_string(self.links_path())?;
+        let mut links = Vec::new();
+        let mut malformed = Vec::new();
+        for (index, line) in content.lines().enumerate() {
+            match parse_link_line(line) {
+                Some(entry) => links.push(entry),
+                None => malformed.push(MalformedLinkLine {
+                    line_number: index + 1,
+                    raw: line.to_string(),
+                }),
+            }
+        }
+        if malformed.is_empty() {
+            Ok(StrictLinksRead::Ok(links))
+        } else {
+            Ok(StrictLinksRead::Malformed(malformed))
+        }
     }
 
     pub fn find_link(&self, dir: &str) -> Result<Option<ResolvedLink>, LinkResolveError> {
@@ -487,6 +531,56 @@ mod tests {
             c.all_links().unwrap(),
             vec![("/other".to_string(), "personal".to_string())]
         );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn read_links_strict_ok_on_an_empty_store() {
+        let c = temp_config("strict-empty");
+        assert_eq!(c.read_links_strict().unwrap(), StrictLinksRead::Ok(vec![]));
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn read_links_strict_ok_on_well_formed_lines() {
+        let c = temp_config("strict-ok");
+        fs::write(c.links_path(), "/one=work\n/two=personal\n").unwrap();
+        assert_eq!(
+            c.read_links_strict().unwrap(),
+            StrictLinksRead::Ok(vec![
+                ("/one".to_string(), "work".to_string()),
+                ("/two".to_string(), "personal".to_string()),
+            ])
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn read_links_strict_reports_every_malformed_line_with_its_number() {
+        let c = temp_config("strict-malformed");
+        fs::write(
+            c.links_path(),
+            "/one=work\nmissing-delimiter\n/two=personal\n=no-directory\n",
+        )
+        .unwrap();
+        match c.read_links_strict().unwrap() {
+            StrictLinksRead::Malformed(bad) => {
+                assert_eq!(
+                    bad,
+                    vec![
+                        MalformedLinkLine {
+                            line_number: 2,
+                            raw: "missing-delimiter".to_string()
+                        },
+                        MalformedLinkLine {
+                            line_number: 4,
+                            raw: "=no-directory".to_string()
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected malformed lines, got {other:?}"),
+        }
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 

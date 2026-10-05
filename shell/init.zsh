@@ -98,6 +98,11 @@ _claude_acc_completion() {
         --version)
             return
             ;;
+        --path)
+            # `status --path` takes a directory; only offered for `status`.
+            [[ "$cmd" == status ]] && _files -/
+            return
+            ;;
     esac
 
     if [[ "$cur" == -* ]]; then
@@ -108,6 +113,10 @@ _claude_acc_completion() {
             import) flags=('--move:Move the directory instead of copying it') ;;
             statusline) flags=('--install:Write the statusLine config into settings.json') ;;
             sessions) flags=('--all:Every project, not just this directory') ;;
+            list) flags=('--json:Output as JSON') ;;
+            links) flags=('--json:Output as JSON') ;;
+            status) flags=('--json:Output as JSON' '--path:Directory to resolve instead of the current one (requires --json)') ;;
+            usage) flags=('--json:Output as JSON') ;;
             doctor) flags=('--json:Output as JSON') ;;
             update) flags=('--check:Only check, do not download' '--version:Install a specific version') ;;
             session) flags=('--to:Destination account' '--from:Source account' '--force:Skip confirmation' '-f:Skip confirmation') ;;
