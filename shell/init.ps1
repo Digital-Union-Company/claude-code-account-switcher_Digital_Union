@@ -44,6 +44,14 @@ Register-ArgumentCompleter -CommandName claude-acc -ScriptBlock {
         $candidates = & $accountsWithDefault
     } elseif ($prev -eq '--version') {
         $candidates = @()
+    } elseif ($prev -eq '--path' -and $cmd -eq 'status') {
+        # Directory completion for `status --path <TAB>`. Get-ChildItem
+        # -Directory works unchanged on both Windows PowerShell 5.1 and
+        # PowerShell 7+, so no version-specific API is needed here.
+        $base = Split-Path $wordToComplete -Parent -ErrorAction SilentlyContinue
+        $searchDir = if ($base) { $base } else { '.' }
+        $candidates = Get-ChildItem -Path $searchDir -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { if ($base) { Join-Path $base $_.Name } else { $_.Name } }
     } elseif ($wordToComplete -like '-*') {
         switch ($cmd) {
             'add'        { $candidates = @('--seed','-s') }

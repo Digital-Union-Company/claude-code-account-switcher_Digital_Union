@@ -358,13 +358,15 @@ fn run_json(config: &AppConfig, accounts: &[String], standard_present: bool) -> 
         None
     };
 
-    let doc = serde_json::json!({
-        "schema_version": crate::machine::SCHEMA_VERSION,
-        "ok": true,
+    // Goes through the shared emitter so a serialization failure falls back
+    // to machine::SERIALIZATION_FAILED_FALLBACK instead of the empty string
+    // `to_string_pretty(..).unwrap_or_default()` used to print — while the
+    // exit code stays doctor's own semantic finding (rule 4(B)), never the
+    // generic success()'s fixed 0.
+    crate::machine::emit_success_document(serde_json::json!({
         "accounts": entries,
         "standard": standard,
-    });
-    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    }));
 
     if any_problem { 1 } else { 0 }
 }

@@ -631,8 +631,41 @@ _claude_acc_help() {
     echo "  claude-acc desktop add|clone-config|clone-runtime|list|run|remove [<name>]  $(_msg help_desktop)"
 }
 
+# A fixed-shape JSON error for a missing machine-mode dependency. Must not
+# itself depend on `jq` — `jq` may be exactly the dependency that is
+# missing, and the frozen contract requires one valid JSON document on
+# stdout even then. `dep` always comes from this file's own small internal
+# allow-list (security/curl/jq/shasum/date), never user-controlled, so a
+# plain `printf` template is safe — no value here ever needs JSON escaping.
+_claude_acc_machine_dependency_error() {
+    local dep="$1"
+    printf '{\n  "schema_version": 1,\n  "ok": false,\n  "error": {\n    "code": "DEPENDENCY_MISSING",\n    "message": "required machine-mode dependency is unavailable",\n    "details": {\n      "dependency": "%s"\n    }\n  }\n}\n' "$dep"
+    return 1
+}
+
+# Check every dependency in `$@` is on PATH; on the first missing one, print
+# the machine-safe error above and return 1 — never the pre-existing
+# localized `_msg ..._missing_dep` text, which is for the human command
+# path only and must never reach a `--json` caller's stdout. Must run
+# before any `jq`-based assembly starts.
+_claude_acc_require_machine_deps() {
+    local dep
+    for dep in "$@"; do
+        command -v "$dep" >/dev/null 2>&1 || { _claude_acc_machine_dependency_error "$dep"; return 1; }
+    done
+    return 0
+}
+
 _claude_acc_list() {
     if [[ "${1:-}" == "--json" ]]; then
+        # `jq` is the only hard requirement: without it the JSON assembly
+        # itself cannot produce a document at all. `security`/`shasum`
+        # are not gated here — their absence (e.g. on Linux, where this
+        # script also runs in CI) already degrades gracefully to
+        # auth_present:false / token_changed_since_audit:false via the
+        # existing `[[ -z ... ]]` checks, which is a valid, correctly
+        # labeled JSON result, not a broken one.
+        _claude_acc_require_machine_deps jq || return 1
         _claude_acc_list_json
         return $?
     fi
@@ -1059,6 +1092,7 @@ _claude_acc_unlink() {
 
 _claude_acc_links() {
     if [[ "${1:-}" == "--json" ]]; then
+        _claude_acc_require_machine_deps jq || return 1
         _claude_acc_links_json
         return $?
     fi
@@ -1196,9 +1230,15 @@ _claude_acc_status_json() {
         return 1
     fi
 
-    local dir="$query_path" resolved="" source="" owning=""
+    # `raw_accounts` is declared once, here, outside the loop below — zsh
+    # echoes "name=value" to stdout when a `local` re-declares a name that
+    # already exists in the same scope (the same trap this file's own
+    # human doctor code already comments on), and this loop can run many
+    # times per call. Caught only by actually running this under zsh:
+    # every ancestor-walk iteration past the first corrupted stdout with a
+    # stray "raw_accounts=..." line ahead of the JSON document.
+    local dir="$query_path" resolved="" source="" owning="" raw_accounts
     while [[ "$dir" != "/" && -n "$dir" ]]; do
-        local raw_accounts
         raw_accounts=$(_claude_links_accounts_for_dir "$dir")
         # Guard on the raw string before splitting: zsh's `(f)` on an empty
         # string yields a one-element array holding "", not a zero-element
@@ -1208,15 +1248,26 @@ _claude_acc_status_json() {
         if [[ -n "$raw_accounts" ]]; then
             local -a accounts_for_dir
             accounts_for_dir=("${(@f)raw_accounts}")
+            # Distinct-account counting decides *whether* this is ambiguous
+            # — it must never decide *what gets reported*. Two stored
+            # entries naming the same account (e.g. two identical lines)
+            # are not themselves a conflict, but once a second, different
+            # account is also present, every matching stored entry is part
+            # of the mapping, including repeats — mirrors
+            # LinkResolveError::Ambiguous::mappings, which is exactly the
+            # unfiltered list `find_link` collected.
             local -A seen=()
-            local -a distinct=()
+            local -i distinct_count=0
             local acct
             for acct in "${accounts_for_dir[@]}"; do
-                [[ -z "${seen[$acct]:-}" ]] && { distinct+=("$acct"); seen[$acct]=1; }
+                if [[ -z "${seen[$acct]:-}" ]]; then
+                    seen[$acct]=1
+                    (( distinct_count++ ))
+                fi
             done
-            if (( ${#distinct} > 1 )); then
+            if (( distinct_count > 1 )); then
                 local mappings="[]" a
-                for a in "${distinct[@]}"; do
+                for a in "${accounts_for_dir[@]}"; do
                     mappings=$(jq --arg p "$dir" --arg a "$a" \
                         '. + [{stored_path:$p, account:$a}]' <<< "$mappings")
                 done
@@ -1227,7 +1278,7 @@ _claude_acc_status_json() {
                               details: {query_path: $qp, mappings: $mappings}}}'
                 return 1
             fi
-            resolved="${distinct[1]}"
+            resolved="${accounts_for_dir[1]}"
             source="linked"
             owning="$dir"
             break
@@ -1260,23 +1311,29 @@ _claude_acc_status_json() {
 }
 
 _claude_acc_status() {
-    local json=0 path="" args=("$@") i=1
+    # NOT named `path` — that is zsh's special, tied-to-$PATH array, and
+    # shadowing it with a scalar `local` here would break every PATH-based
+    # command lookup (`jq`, `security`, ...) for the rest of this function
+    # and everything it calls, dynamically-scoped, for the duration of the
+    # call. Caught by actually running this under zsh, not by inspection.
+    local json=0 path_arg="" args=("$@") i=1
     while (( i <= ${#args} )); do
         case "${args[$i]}" in
             --json) json=1 ;;
-            --path) (( i++ )); path="${args[$i]:-}" ;;
+            --path) (( i++ )); path_arg="${args[$i]:-}" ;;
         esac
         (( i++ ))
     done
     if (( json )); then
-        if [[ -n "$path" ]]; then
-            _claude_acc_status_json --path "$path"
+        _claude_acc_require_machine_deps jq || return 1
+        if [[ -n "$path_arg" ]]; then
+            _claude_acc_status_json --path "$path_arg"
         else
             _claude_acc_status_json
         fi
         return $?
     fi
-    if [[ -n "$path" ]]; then
+    if [[ -n "$path_arg" ]]; then
         _msg status_json_required_for_path
         return 1
     fi
@@ -2449,6 +2506,11 @@ _claude_acc_usage_entry_json() {
     local token; token=$(_claude_acc_token "$token_dir")
     local source="" fetched_at="" five="null" seven="null"
 
+    # Mirrors identity::fetch_account_usage_detail exactly: with no token,
+    # the cache is never consulted — a no-token config dir is "unavailable",
+    # full stop, the same as the human usage command's NoToken state. The
+    # cache is a last resort for a *live request that failed*, never a
+    # substitute for a token that was never there to try with.
     if [[ -n "$token" ]]; then
         local live; live=$(_claude_acc_usage_fetch_json "$token")
         if [[ -n "$live" ]]; then
@@ -2456,19 +2518,17 @@ _claude_acc_usage_entry_json() {
             fetched_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             five=$(_claude_acc_usage_suppress_expired "$(jq -c '.five_hour // null' <<< "$live")" 0)
             seven=$(_claude_acc_usage_suppress_expired "$(jq -c '.seven_day // null' <<< "$live")" 0)
-        fi
-    fi
-
-    if [[ -z "$source" ]]; then
-        local cached; cached=$(_claude_acc_usage_cached_json "$(_claude_acc_config_json "$name")")
-        if [[ -n "$cached" ]]; then
-            source="cache"
-            local fetched_secs raw
-            fetched_secs="${cached%%$'\t'*}"
-            raw="${cached#*$'\t'}"
-            fetched_at=$(_claude_acc_epoch_to_iso8601 "$fetched_secs")
-            five=$(_claude_acc_usage_suppress_expired "$(jq -c '.five_hour // null' <<< "$raw")" 1)
-            seven=$(_claude_acc_usage_suppress_expired "$(jq -c '.seven_day // null' <<< "$raw")" 1)
+        else
+            local cached; cached=$(_claude_acc_usage_cached_json "$(_claude_acc_config_json "$name")")
+            if [[ -n "$cached" ]]; then
+                source="cache"
+                local fetched_secs raw
+                fetched_secs="${cached%%$'\t'*}"
+                raw="${cached#*$'\t'}"
+                fetched_at=$(_claude_acc_epoch_to_iso8601 "$fetched_secs")
+                five=$(_claude_acc_usage_suppress_expired "$(jq -c '.five_hour // null' <<< "$raw")" 1)
+                seven=$(_claude_acc_usage_suppress_expired "$(jq -c '.seven_day // null' <<< "$raw")" 1)
+            fi
         fi
     fi
 
@@ -2512,6 +2572,11 @@ _claude_acc_usage_json() {
 
 _claude_acc_usage() {
     if [[ "${1:-}" == "--json" ]]; then
+        # Only `jq` is hard-gated — see the comment in _claude_acc_list.
+        # `curl`/`security`/`date` missing degrades to a live fetch/cache
+        # read that fails the same way "offline"/"no network" already
+        # does: `source: "unavailable"`, still a valid document.
+        _claude_acc_require_machine_deps jq || return 1
         _claude_acc_usage_json
         return $?
     fi
@@ -2898,13 +2963,25 @@ _claude_acc_doctor() {
         shift
     fi
 
-    local dep
-    for dep in security curl jq shasum; do
-        if ! command -v "$dep" >/dev/null 2>&1; then
-            _msg doctor_missing_dep "$dep"
-            return 1
-        fi
-    done
+    if (( json )); then
+        # Machine-safe check first: `--json` must never reach the
+        # localized, human-text `doctor_missing_dep` path below, whose
+        # output would violate the one-JSON-document stdout contract.
+        # Only `jq` is hard-gated, same reasoning as _claude_acc_list/
+        # _claude_acc_usage: `curl`/`security`/`shasum` missing degrades
+        # every row to "offline"/"no_token", which is still a valid
+        # document, not a broken one — and this command's own test suite
+        # runs on Linux CI, where `security`/`shasum` do not exist at all.
+        _claude_acc_require_machine_deps jq || return 1
+    else
+        local dep
+        for dep in security curl jq shasum; do
+            if ! command -v "$dep" >/dev/null 2>&1; then
+                _msg doctor_missing_dep "$dep"
+                return 1
+            fi
+        done
+    fi
 
     local accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))
     local standard_label="~/.claude/"
@@ -3089,7 +3166,12 @@ _claude_acc_json_lock_fields() {
 # the standard row, which never carries one). `acc_name` is the lock/chrome
 # lookup name ("default" for standard, the account name otherwise).
 _claude_acc_doctor_entry_json() {
-    local name="$1" status="$2" email="$3" uuid="$4" plan="$5" config_dir="$6"
+    # Second parameter is NOT named `status` — that is zsh's special,
+    # read-only-as-a-fresh-local alias for `$?`; `local status=...` fails
+    # outright ("read-only variable: status"), caught only by actually
+    # running this under zsh. `entry_status` still becomes the JSON field
+    # named "status" below — only the shell-side name changes.
+    local name="$1" entry_status="$2" email="$3" uuid="$4" plan="$5" config_dir="$6"
     local is_default="$7" acc_name="$8"
 
     local lock_fields lock pinned
@@ -3105,7 +3187,7 @@ _claude_acc_doctor_entry_json() {
     esac
 
     jq -n \
-        --arg name "$name" --arg status "$status" \
+        --arg name "$name" --arg status "$entry_status" \
         --arg email "$email" --arg uuid "$uuid" --arg plan "$plan" \
         --arg lock "$lock" --arg pinned "$pinned" \
         --argjson chrome "$chrome_json" --arg config_dir "$config_dir" \
@@ -3281,9 +3363,33 @@ _claude_acc_completion() {
         "help:$(_msg help_help)"
     )
 
+    local cmd="${words[2]}" cur="${words[CURRENT]}" prev="${words[CURRENT-1]}"
+
     if (( CURRENT == 2 )); then
         _describe 'command' subcmds
-    elif (( CURRENT == 3 )); then
+        return
+    fi
+
+    # `status --path <TAB>` — directory completion for the flag's value,
+    # the same as the Rust CLI's completion in shell/init.zsh.
+    if [[ "$cmd" == status && "$prev" == --path ]]; then
+        _files -/
+        return
+    fi
+
+    # Machine API flags — covers the five --json commands (CM0.5); only
+    # `status` also takes --path.
+    if [[ "$cur" == -* ]]; then
+        local -a flags
+        case "$cmd" in
+            list|links|usage|doctor) flags=('--json:Output as JSON') ;;
+            status) flags=('--json:Output as JSON' '--path:Directory to resolve instead of the current one (requires --json)') ;;
+        esac
+        (( ${#flags} )) && _describe 'option' flags
+        return
+    fi
+
+    if (( CURRENT == 3 )); then
         case "${words[2]}" in
             remove|clone-settings)
                 accounts=("$CLAUDE_SWITCH_ACCOUNTS_DIR"/*(N:t))

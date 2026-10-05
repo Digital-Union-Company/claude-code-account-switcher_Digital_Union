@@ -17,10 +17,20 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// 4(A) uses. `fields` must be a JSON object; its keys are merged into the
 /// envelope.
 pub fn success(fields: Value) -> i32 {
+    emit_success_document(fields);
+    0
+}
+
+/// [`success`], without deciding the exit code — for a command like
+/// `doctor` whose exit code encodes a semantic finding about the audited
+/// data (rule 4(B)), not "did this call fail" (rule 4(A)). Still goes
+/// through the same [`print_doc`] fallback, so `doctor`'s own emission
+/// gets the same never-silently-empty guarantee as every other command's,
+/// without a second, independently-unverified serialization path.
+pub fn emit_success_document(fields: Value) {
     let mut doc = json!({ "schema_version": SCHEMA_VERSION, "ok": true });
     merge_object(&mut doc, fields);
     print_doc(&doc);
-    0
 }
 
 /// Print the structured operational-failure envelope and return exit code 1.
@@ -45,15 +55,21 @@ fn merge_object(base: &mut Value, extra: Value) {
     }
 }
 
+/// The one-JSON-document invariant must hold even if serializing `doc`
+/// itself somehow fails — a literal string constant, not built through
+/// `serde_json`, since that is exactly the machinery assumed broken on this
+/// path. Factored out (rather than inlined in `print_doc`) so it can be
+/// parsed and asserted on directly in a test instead of only trusted by
+/// inspection.
+const SERIALIZATION_FAILED_FALLBACK: &str = r#"{"schema_version":1,"ok":false,"error":{"code":"SERIALIZATION_FAILED","message":"internal error: failed to serialize JSON output","details":{}}}"#;
+
 /// Serialize and print `doc`. A serialization failure must not degrade into
-/// empty/partial stdout — fall back to a fixed, always-valid error document
+/// empty/partial stdout — fall back to [`SERIALIZATION_FAILED_FALLBACK`]
 /// instead, so the one-JSON-document invariant holds even on that path.
 fn print_doc(doc: &Value) {
     match serde_json::to_string_pretty(doc) {
         Ok(s) => println!("{s}"),
-        Err(_) => println!(
-            r#"{{"schema_version":1,"ok":false,"error":{{"code":"SERIALIZATION_FAILED","message":"internal error: failed to serialize JSON output","details":{{}}}}}}"#
-        ),
+        Err(_) => println!("{SERIALIZATION_FAILED_FALLBACK}"),
     }
 }
 
@@ -76,5 +92,18 @@ mod tests {
         let mut base = json!({"ok": true});
         merge_object(&mut base, json!("not an object"));
         assert_eq!(base, json!({"ok": true}));
+    }
+
+    // The last-resort path's own output must satisfy the exact same
+    // contract everything else here does — proven by parsing it with the
+    // same JSON library the rest of this module uses, not by inspection.
+    #[test]
+    fn serialization_failed_fallback_is_itself_valid_json() {
+        let parsed: Value = serde_json::from_str(SERIALIZATION_FAILED_FALLBACK)
+            .expect("the last-resort fallback must itself be valid JSON");
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"]["code"], "SERIALIZATION_FAILED");
+        assert_eq!(parsed["error"]["details"], json!({}));
     }
 }

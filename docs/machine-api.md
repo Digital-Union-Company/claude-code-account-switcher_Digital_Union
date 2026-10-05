@@ -32,9 +32,16 @@ This is the contract a tool like a GUI front-end builds against.
   differently between CLAUDE_ACC_LANG settings or versions; `code` will not.
 - **No field anywhere carries a secret** — not a token, not a hash, not a
   credential-file path's contents.
-- Paths are absolute. The two platforms this ships for use native
-  separators (`\` on Windows, `/` elsewhere); nothing is rewritten for
-  display.
+- Paths are absolute. Supported platforms use their native separator
+  (`\` on Windows, `/` elsewhere); nothing is rewritten for display.
+- **Path equivalence is platform-dependent, and only Windows's is
+  case/slash-insensitive.** On Windows, claude-acc treats case and `/`
+  vs `\` as equivalent when comparing stored links (`src/path_identity.rs`).
+  On every other supported platform, path equivalence is exact-string —
+  `/Users/alice/work` and `/Users/alice/Work` are two unrelated,
+  non-conflicting paths there, not an ambiguity. The examples below use
+  repeated, identically-spelled stored paths precisely so they hold
+  regardless of platform.
 
 ## `claude-acc list --json`
 
@@ -168,12 +175,17 @@ $ claude-acc status --json
         "query_path": "/Users/alice/Work",
         "mappings": [
           { "stored_path": "/Users/alice/Work", "account": "personal1" },
-          { "stored_path": "/Users/alice/work", "account": "personal2" }
+          { "stored_path": "/Users/alice/Work", "account": "personal2" }
         ]
       }
     }
   }
   ```
+  (Two *identically-spelled* stored links naming different accounts — the
+  simplest ambiguity that holds on every platform. On Windows, two
+  case/slash-variant spellings of the same directory would conflict the
+  same way; on other platforms they would not, since path equivalence
+  there is exact-string — see the note above.)
 - `--path` errors: `PATH_NOT_FOUND` if it doesn't exist, `PATH_NOT_DIRECTORY`
   if it exists but isn't a directory.
 
@@ -189,14 +201,14 @@ $ claude-acc links --json
   "ok": true,
   "links": [
     { "stored_path": "/Users/alice/work", "account": "personal1" },
-    { "stored_path": "/Users/alice/Work", "account": "personal2" }
+    { "stored_path": "/Users/alice/work", "account": "personal2" }
   ],
   "conflicts": [
     {
       "code": "AMBIGUOUS_EQUIVALENT_PATHS",
       "mappings": [
         { "stored_path": "/Users/alice/work", "account": "personal1" },
-        { "stored_path": "/Users/alice/Work", "account": "personal2" }
+        { "stored_path": "/Users/alice/work", "account": "personal2" }
       ]
     }
   ]
@@ -204,7 +216,15 @@ $ claude-acc links --json
 ```
 
 - `links` is the complete, unconditional dump, in the order stored —
-  original spelling, never normalized for display.
+  original spelling (case, separators, every character of the path and
+  account name itself), never normalized for display. The one exception
+  is not a normalization at all but the stored format's own syntax:
+  whitespace immediately touching the `=` delimiter is trimmed when the
+  line is parsed, the same way it would be for any `key=value` file — a
+  line written as `  /Users/alice/work  =personal1` stores
+  `/Users/alice/work`, not a copy padded with those spaces. This is not
+  byte-for-byte line preservation; it is spelling preservation of the
+  path and account values the delimiter actually separates.
 - A `conflicts` group appears only when two or more *distinct* accounts
   share an equivalence class; the same account linked under two equivalent
   spellings is unremarkable and stays as ordinary `links` entries. No
