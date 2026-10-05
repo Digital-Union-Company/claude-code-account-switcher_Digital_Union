@@ -1120,6 +1120,44 @@ _claude_acc_links() {
     done
 }
 
+# Trim ASCII whitespace (space/tab) from both ends of `$1`. Used only by
+# the strict machine-mode link parser below, to match Rust's `str::trim()`
+# of the delimiter-adjacent padding in config.rs::parse_link_line — never
+# applied to meaningful whitespace inside a path or account value, since
+# this only ever runs on the two pieces already split off by `=`.
+_claude_acc_trim_whitespace() {
+    local s="$1"
+    while [[ "$s" == [[:space:]]* ]]; do
+        s="${s#?}"
+    done
+    while [[ "$s" == *[[:space:]] ]]; do
+        s="${s%?}"
+    done
+    print -r -- "$s"
+}
+
+# Strict machine-mode link-line parser — mirrors config.rs's
+# parse_link_line exactly: split on the FINAL `=` (so a stored path that
+# itself contains `=` characters still parses correctly, e.g.
+# "C:\repo=a=work" -> stored "C:\repo=a", account "work"), then trim
+# whitespace immediately touching the delimiter from each side. Prints
+# "stored_path<TAB>account" and returns 0 on success; returns 1 (printing
+# nothing) if the line has no `=` at all, or either trimmed side is
+# empty. This is the one parser both `links --json` and `status --json`'s
+# exact-path lookup use (see _claude_links_accounts_for_dir below), so
+# the two can never disagree about what a stored line means. Deliberately
+# separate from the pre-existing permissive human-mode parsing in
+# _claude_acc_links/_claude_dir_account, which this correction does not
+# touch — see .claude/rules/shell-parity.md.
+_claude_acc_parse_link_line_machine() {
+    local line="$1" stored account
+    [[ "$line" == *"="* ]] || return 1
+    stored=$(_claude_acc_trim_whitespace "${line%=*}")
+    account=$(_claude_acc_trim_whitespace "${line##*=}")
+    [[ -z "$stored" || -z "$account" ]] && return 1
+    printf '%s\t%s' "$stored" "$account"
+}
+
 # `claude-acc links --json` (CM0.5) — docs/machine-api.md §3's stored
 # routing map plus a genuine whole-store conflict analysis. Unlike the human
 # command (which silently skips any line without `=`), a malformed line is
@@ -1141,22 +1179,18 @@ _claude_acc_links_json() {
     fi
 
     local -a bad_lines
-    local line_no=0 line stored account
+    local line_no=0 line parsed stored account
     local links_json="[]"
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( line_no++ ))
-        if [[ "$line" == *"="* ]]; then
-            stored="${line%=*}"
-            account="${line##*=}"
+        if parsed=$(_claude_acc_parse_link_line_machine "$line"); then
+            stored="${parsed%%$'\t'*}"
+            account="${parsed#*$'\t'}"
+            links_json=$(jq --arg p "$stored" --arg a "$account" \
+                '. + [{stored_path:$p, account:$a}]' <<< "$links_json")
         else
-            stored=""; account=""
-        fi
-        if [[ -z "$stored" || -z "$account" ]]; then
             bad_lines+=("$line_no"$'\t'"$line")
-            continue
         fi
-        links_json=$(jq --arg p "$stored" --arg a "$account" \
-            '. + [{stored_path:$p, account:$a}]' <<< "$links_json")
     done < "$CLAUDE_SWITCH_LINKS"
 
     if (( ${#bad_lines} > 0 )); then
@@ -1191,13 +1225,23 @@ _claude_acc_links_json() {
 # (see path_identity.rs's non-Windows branch), so this is both the lookup
 # and the ambiguity-detection building block: more than one distinct value
 # here for the same directory is an AMBIGUOUS_LINK.
+#
+# Uses the same strict parser `links --json` uses (trimmed, final-`=`
+# split), so `status --json` can never resolve a delimiter-padded line
+# differently than `links --json` reports it. A line that fails to parse
+# is silently skipped here, never an error — matching Rust's
+# `AppConfig::all_links`/`find_link` (used by `resolve::effective_route`),
+# which is permissive the same way the human command is; only
+# `links --json`'s own strict reader surfaces a malformed line as
+# `LINKS_STORE_INVALID`.
 _claude_links_accounts_for_dir() {
-    local dir="$1" line stored account
+    local dir="$1" line parsed stored account
     [[ -f "$CLAUDE_SWITCH_LINKS" ]] || return 0
-    while IFS= read -r line; do
-        [[ "$line" == *"="* ]] || continue
-        stored="${line%=*}"; account="${line##*=}"
-        [[ -n "$stored" && -n "$account" && "$stored" == "$dir" ]] && print -r -- "$account"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        parsed=$(_claude_acc_parse_link_line_machine "$line") || continue
+        stored="${parsed%%$'\t'*}"
+        account="${parsed#*$'\t'}"
+        [[ "$stored" == "$dir" ]] && print -r -- "$account"
     done < "$CLAUDE_SWITCH_LINKS"
 }
 
@@ -1288,12 +1332,26 @@ _claude_acc_status_json() {
 
     if [[ -z "$resolved" ]]; then
         local default_acc; default_acc=$(_claude_default_account)
-        if [[ -n "$default_acc" && -d "$CLAUDE_SWITCH_ACCOUNTS_DIR/$default_acc" ]]; then
+        if [[ -z "$default_acc" ]]; then
+            # No configured managed default at all — standard is the
+            # fallback with no routing layer having made a decision.
+            resolved="default"
+            source="standard"
+        elif [[ -d "$CLAUDE_SWITCH_ACCOUNTS_DIR/$default_acc" ]]; then
             resolved="$default_acc"
             source="default"
         else
+            # A managed default IS configured, but its account directory
+            # no longer exists. The actual shim still falls back to
+            # standard — this is reporting parity, not a request to
+            # launch the stale account — but `source` must stay "default":
+            # the configured default was the routing layer that made the
+            # (now-unusable) decision, same as src/resolve.rs::
+            # effective_route's `Some(_stale)` case, which is `source:
+            # Default`, never `Standard`. Collapsing this into "standard"
+            # would claim no default was ever configured at all.
             resolved="default"
-            source="standard"
+            source="default"
         fi
     elif [[ "$resolved" == "default" || ! -d "$CLAUDE_SWITCH_ACCOUNTS_DIR/$resolved" ]]; then
         # A link to the literal "default", or to a managed account that no

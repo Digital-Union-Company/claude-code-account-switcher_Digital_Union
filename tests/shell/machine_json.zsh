@@ -207,6 +207,95 @@ check "mapping order is preserved — third personal2" \
     "personal2" "$(jqf '.error.details.mappings[2].account' "$out")"
 
 print -r -- ""
+print -r -- "status --json configured-default source parity (independent-review correction):"
+
+# Regression: a configured managed default whose account directory had
+# gone stale used to collapse into source:"standard" — indistinguishable
+# from no default ever having been configured at all. Rust's
+# effective_route reports source:"default" for both "configured and
+# usable" and "configured but stale", and only "standard" for "no
+# configured default at all" — three states, not two.
+: > "$CLAUDE_SWITCH_LINKS"
+default_probe_dir="$scratch/default-probe"
+mkdir -p "$default_probe_dir" "$CLAUDE_SWITCH_ACCOUNTS_DIR/ghost"
+
+print -r -- "default=ghost" > "$CLAUDE_SWITCH_CONFIG"
+out=$(claude-acc status --json --path "$default_probe_dir")
+check "existing managed default resolves to that account" \
+    "ghost" "$(jqf '.resolved_account' "$out")"
+check "existing managed default source is \"default\"" \
+    "default" "$(jqf '.source' "$out")"
+check "existing managed default has no owning_link_path" \
+    "null" "$(jqf '.owning_link_path' "$out")"
+
+# Stale it: remove the managed account directory, leave the config
+# pointing at it. The actual shim still falls back to standard — this is
+# reporting parity, not a request to launch the stale account — but the
+# configured default was still the routing layer that decided this.
+rm -rf "$CLAUDE_SWITCH_ACCOUNTS_DIR/ghost"
+out=$(claude-acc status --json --path "$default_probe_dir")
+check "stale managed default effectively falls back to standard" \
+    "default" "$(jqf '.resolved_account' "$out")"
+check "stale managed default source is still \"default\", not \"standard\"" \
+    "default" "$(jqf '.source' "$out")"
+check "stale managed default has no owning_link_path" \
+    "null" "$(jqf '.owning_link_path' "$out")"
+
+# Clear the configured default entirely: now no routing layer decided
+# anything, and only this state may report source:"standard".
+print -r -- "default=" > "$CLAUDE_SWITCH_CONFIG"
+out=$(claude-acc status --json --path "$default_probe_dir")
+check "no configured default at all resolves to standard" \
+    "default" "$(jqf '.resolved_account' "$out")"
+check "no configured default at all source is \"standard\"" \
+    "standard" "$(jqf '.source' "$out")"
+
+print -r -- ""
+print -r -- "machine link parser parity (independent-review correction):"
+
+# A. Stored path containing its own "=" — must split on the FINAL "="
+# only, same as Rust's rsplit_once('=').
+: > "$CLAUDE_SWITCH_LINKS"
+eq_path="$scratch/repo=a"
+mkdir -p "$eq_path" "$CLAUDE_SWITCH_ACCOUNTS_DIR/personal2"
+print -r -- "${eq_path}=personal2" > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "a stored path containing its own = splits on the final = only" \
+    "$eq_path" "$(jqf '.links[0].stored_path' "$out")"
+check "the account after that final = is exactly personal2" \
+    "personal2" "$(jqf '.links[0].account' "$out")"
+
+# B. Delimiter-adjacent whitespace is trimmed; status --json's exact-path
+# lookup must agree with what links --json reports for the same line.
+padded_dir="$scratch/padded"
+mkdir -p "$padded_dir"
+print -r -- "  ${padded_dir}  =  personal2  " > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "delimiter-adjacent whitespace is trimmed from the stored path" \
+    "$padded_dir" "$(jqf '.links[0].stored_path' "$out")"
+check "delimiter-adjacent whitespace is trimmed from the account" \
+    "personal2" "$(jqf '.links[0].account' "$out")"
+
+status_out=$(claude-acc status --json --path "$padded_dir")
+check "status --json resolves the same trimmed path links --json reports" \
+    "personal2" "$(jqf '.resolved_account' "$status_out")"
+check "status --json reports it as linked" \
+    "linked" "$(jqf '.source' "$status_out")"
+check "status --json's owning_link_path is the trimmed path, not the padded raw line" \
+    "$padded_dir" "$(jqf '.owning_link_path' "$status_out")"
+
+# C. Malformed even after trimming: an empty directory or empty account.
+print -r -- "   = personal2" > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "whitespace-only directory before = is LINKS_STORE_INVALID" \
+    "LINKS_STORE_INVALID" "$(jqf '.error.code' "$out")"
+
+print -r -- "${padded_dir} =    " > "$CLAUDE_SWITCH_LINKS"
+out=$(claude-acc links --json)
+check "whitespace-only account after = is LINKS_STORE_INVALID" \
+    "LINKS_STORE_INVALID" "$(jqf '.error.code' "$out")"
+
+print -r -- ""
 print -r -- "machine-mode dependency failures (independent-review correction):"
 
 jq_bin=$(command -v jq)
