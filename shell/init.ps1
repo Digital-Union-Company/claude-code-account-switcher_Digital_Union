@@ -52,6 +52,10 @@ Register-ArgumentCompleter -CommandName claude-acc -ScriptBlock {
             'import'     { $candidates = @('--move') }
             'statusline' { $candidates = @('--install') }
             'sessions'   { $candidates = @('--all') }
+            'list'       { $candidates = @('--json') }
+            'links'      { $candidates = @('--json') }
+            'status'     { $candidates = @('--json','--path') }
+            'usage'      { $candidates = @('--json') }
             'doctor'     { $candidates = @('--json') }
             'update'     { $candidates = @('--check','--version') }
             'session'    { $candidates = @('--to','--from','--force','-f') }

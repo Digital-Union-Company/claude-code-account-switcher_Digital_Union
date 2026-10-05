@@ -11,6 +11,7 @@ mod environment;
 mod i18n;
 mod ide;
 mod identity;
+mod machine;
 mod path_identity;
 mod powershell;
 mod resolve;
@@ -36,7 +37,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// List all accounts
-    List,
+    List {
+        /// Output as JSON (suitable for scripting)
+        #[arg(long)]
+        json: bool,
+    },
     /// Add account (runs claude login)
     Add {
         name: String,
@@ -102,11 +107,26 @@ enum Commands {
     /// Unlink current directory
     Unlink,
     /// Show all directory links
-    Links,
+    Links {
+        /// Output as JSON (suitable for scripting)
+        #[arg(long)]
+        json: bool,
+    },
     /// Show active account
-    Status,
+    Status {
+        /// Output as JSON (suitable for scripting)
+        #[arg(long)]
+        json: bool,
+        /// Directory to resolve instead of the current one (requires --json)
+        #[arg(long, requires = "json")]
+        path: Option<String>,
+    },
     /// Show usage (5h / 7d rate-limit windows) for every account
-    Usage,
+    Usage {
+        /// Output as JSON (suitable for scripting)
+        #[arg(long)]
+        json: bool,
+    },
     /// Render the Claude Code status line (reads session JSON on stdin)
     ///
     /// Wire it into Claude Code's `statusLine` setting. Run with `--install`
@@ -327,15 +347,37 @@ enum SessionCommands {
     },
 }
 
+/// Whether `command` is a `--json` machine-mode invocation of one of the five
+/// machine-API commands (docs/machine-api.md). Centralized here so the
+/// stdout-is-exactly-one-JSON-document invariant has exactly one place that
+/// decides it, rather than a per-command "remember not to print the hint"
+/// rule that could quietly stop covering a new command.
+fn is_machine_mode(command: &Option<Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::List { json: true })
+            | Some(Commands::Status { json: true, .. })
+            | Some(Commands::Links { json: true })
+            | Some(Commands::Usage { json: true })
+            | Some(Commands::Doctor { json: true })
+    )
+}
+
 /// Whether `command` is safe to follow with the passive "update available"
 /// hint. Excluded: `Activate`/`Init`/`Completions` (their stdout is `eval`'d
 /// or otherwise machine-parsed by the shell integration — extra text would
 /// break it, not just look untidy), `Statusline` (rendered inside Claude
-/// Code's own UI), `Doctor`/`Update` (may run with `--json`, or is already
-/// about updating), and `Run` (hands the terminal to an interactive `claude`
-/// session that can run for hours — a hint printed before it starts would be
-/// stale by the time anyone sees it).
+/// Code's own UI), `Doctor` (unconditionally — both its human and `--json`
+/// forms, since a script gating on either must never see trailing text),
+/// `Update` (already about updating), `Run` (hands the terminal to an
+/// interactive `claude` session that can run for hours — a hint printed
+/// before it starts would be stale by the time anyone sees it), and every
+/// *other* machine-mode (`--json`) invocation (`is_machine_mode`) — a
+/// command's stdout contract allows nothing but its one JSON document.
 fn should_show_update_hint(command: &Option<Commands>) -> bool {
+    if is_machine_mode(command) {
+        return false;
+    }
     !matches!(
         command,
         Some(Commands::Activate { .. })
@@ -364,9 +406,22 @@ fn main() {
 
     let cli = Cli::parse();
     let config = AppConfig::new();
-    config
-        .init()
-        .expect("Failed to initialize config directory");
+    let machine_mode = is_machine_mode(&cli.command);
+    match config.init() {
+        Ok(()) => {}
+        // A `--json` invocation must still produce its one structured JSON
+        // document on stdout rather than panicking before it gets the
+        // chance (docs/machine-api.md's stdout invariant applies even when
+        // claude-acc's own config store cannot be set up).
+        Err(e) if machine_mode => {
+            std::process::exit(machine::error(
+                "CONFIG_STORE_UNREADABLE",
+                &e.to_string(),
+                serde_json::json!({}),
+            ));
+        }
+        Err(e) => panic!("Failed to initialize config directory: {e}"),
+    }
     let i18n = I18n::new();
     let show_hint = should_show_update_hint(&cli.command);
 
@@ -374,7 +429,10 @@ fn main() {
         None => {
             commands::list::run(&config, &i18n);
         }
-        Some(Commands::List) => commands::list::run(&config, &i18n),
+        Some(Commands::List { json: true }) => {
+            std::process::exit(commands::list::run_json(&config))
+        }
+        Some(Commands::List { json: false }) => commands::list::run(&config, &i18n),
         Some(Commands::Add { name, seed }) => commands::add::run(&config, &i18n, &name, seed),
         Some(Commands::CloneSettings { name }) => {
             commands::clone_settings::run(&config, &i18n, &name)
@@ -397,19 +455,31 @@ fn main() {
         Some(Commands::Reset) => commands::reset::run(&config, &i18n),
         Some(Commands::Link { name }) => commands::link::run(&config, &i18n, &name),
         Some(Commands::Unlink) => commands::unlink::run(&config, &i18n),
-        Some(Commands::Links) => {
+        Some(Commands::Links { json: true }) => {
+            std::process::exit(commands::links::run_json(&config))
+        }
+        Some(Commands::Links { json: false }) => {
             let code = commands::links::run(&config, &i18n);
             if code != 0 {
                 std::process::exit(code);
             }
         }
-        Some(Commands::Status) => {
+        Some(Commands::Status { json: true, path }) => {
+            std::process::exit(commands::status::run_json(&config, path.as_deref()))
+        }
+        Some(Commands::Status {
+            json: false,
+            path: _,
+        }) => {
             let code = commands::status::run(&config, &i18n);
             if code != 0 {
                 std::process::exit(code);
             }
         }
-        Some(Commands::Usage) => commands::usage::run(&config, &i18n),
+        Some(Commands::Usage { json: true }) => {
+            std::process::exit(commands::usage::run_json(&config))
+        }
+        Some(Commands::Usage { json: false }) => commands::usage::run(&config, &i18n),
         Some(Commands::Statusline { install }) => {
             std::process::exit(commands::statusline::run(&config, &i18n, install))
         }
@@ -579,8 +649,79 @@ mod tests {
     #[test]
     fn update_hint_shown_for_ordinary_commands() {
         assert!(should_show_update_hint(&None));
-        assert!(should_show_update_hint(&Some(Commands::List)));
+        assert!(should_show_update_hint(&Some(Commands::List {
+            json: false
+        })));
         assert!(should_show_update_hint(&Some(Commands::Whoami)));
-        assert!(should_show_update_hint(&Some(Commands::Status)));
+        assert!(should_show_update_hint(&Some(Commands::Status {
+            json: false,
+            path: None
+        })));
+    }
+
+    #[test]
+    fn machine_mode_covers_exactly_the_five_json_commands() {
+        assert!(is_machine_mode(&Some(Commands::List { json: true })));
+        assert!(is_machine_mode(&Some(Commands::Links { json: true })));
+        assert!(is_machine_mode(&Some(Commands::Status {
+            json: true,
+            path: None
+        })));
+        assert!(is_machine_mode(&Some(Commands::Usage { json: true })));
+        assert!(is_machine_mode(&Some(Commands::Doctor { json: true })));
+
+        assert!(!is_machine_mode(&Some(Commands::List { json: false })));
+        assert!(!is_machine_mode(&Some(Commands::Links { json: false })));
+        assert!(!is_machine_mode(&Some(Commands::Status {
+            json: false,
+            path: None
+        })));
+        assert!(!is_machine_mode(&Some(Commands::Usage { json: false })));
+        assert!(!is_machine_mode(&Some(Commands::Doctor { json: false })));
+        assert!(!is_machine_mode(&None));
+    }
+
+    #[test]
+    fn update_hint_suppressed_only_for_the_json_form_of_list_links_status_usage() {
+        // The human forms are ordinary commands and keep their hint; only
+        // the --json invocation must have a stdout stream with nothing but
+        // its one JSON document.
+        assert!(should_show_update_hint(&Some(Commands::List {
+            json: false
+        })));
+        assert!(!should_show_update_hint(&Some(Commands::List {
+            json: true
+        })));
+        assert!(should_show_update_hint(&Some(Commands::Links {
+            json: false
+        })));
+        assert!(!should_show_update_hint(&Some(Commands::Links {
+            json: true
+        })));
+        assert!(should_show_update_hint(&Some(Commands::Status {
+            json: false,
+            path: None
+        })));
+        assert!(!should_show_update_hint(&Some(Commands::Status {
+            json: true,
+            path: None
+        })));
+        assert!(should_show_update_hint(&Some(Commands::Usage {
+            json: false
+        })));
+        assert!(!should_show_update_hint(&Some(Commands::Usage {
+            json: true
+        })));
+    }
+
+    #[test]
+    fn status_path_requires_json() {
+        assert!(
+            Cli::try_parse_from(["claude-acc", "status", "--path", "C:\\work"]).is_err(),
+            "--path without --json must be rejected"
+        );
+        assert!(
+            Cli::try_parse_from(["claude-acc", "status", "--json", "--path", "C:\\work"]).is_ok()
+        );
     }
 }

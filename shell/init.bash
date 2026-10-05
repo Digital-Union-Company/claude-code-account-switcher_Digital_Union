@@ -56,6 +56,11 @@ _claude_acc_complete() {
         --version)
             return
             ;;
+        --path)
+            # `status --path` takes a directory; only offered for `status`.
+            [[ "$cmd" == status ]] && COMPREPLY=($(compgen -d -- "$cur"))
+            return
+            ;;
     esac
 
     if [[ "$cur" == -* ]]; then
@@ -66,6 +71,10 @@ _claude_acc_complete() {
             import) COMPREPLY=($(compgen -W "--move" -- "$cur")) ;;
             statusline) COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
             sessions) COMPREPLY=($(compgen -W "--all" -- "$cur")) ;;
+            list) COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
+            links) COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
+            status) COMPREPLY=($(compgen -W "--json --path" -- "$cur")) ;;
+            usage) COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
             doctor) COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;
             update) COMPREPLY=($(compgen -W "--check --version" -- "$cur")) ;;
             session) COMPREPLY=($(compgen -W "--to --from --force -f" -- "$cur")) ;;

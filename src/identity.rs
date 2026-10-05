@@ -723,6 +723,32 @@ pub enum UsageResult {
 /// else would otherwise report another identity's spend as its own, which is
 /// the one mistake this tool must never make.
 pub fn cached_usage(config_dir: &Path) -> Option<(Usage, u64)> {
+    let (usage, fetched_ms) = cached_usage_raw(config_dir)?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as f64;
+    // A clock that has gone backwards since the write would make this
+    // negative; report it as fresh rather than as an absurd age.
+    let age = ((now_ms - fetched_ms).max(0.0) / 1000.0) as u64;
+    Some((usage, age))
+}
+
+/// `cached_usage`, but returning the actual observation time (Unix epoch
+/// seconds) instead of only its age — `usage --json`'s `fetched_at` must
+/// show the real moment Claude Code took the reading, not a value derived
+/// from "now minus an age" a second time (`machine-api.md` §5/§20).
+pub fn cached_usage_detail(config_dir: &Path) -> Option<(Usage, u64, u64)> {
+    let (usage, fetched_ms) = cached_usage_raw(config_dir)?;
+    let fetched_at_secs = (fetched_ms / 1000.0).max(0.0) as u64;
+    let age_secs = now_secs().saturating_sub(fetched_at_secs);
+    Some((usage, fetched_at_secs, age_secs))
+}
+
+/// Shared by `cached_usage`/`cached_usage_detail`: the identity-matched
+/// cached reading and the raw `fetchedAtMs` it was stamped with, before
+/// either caller turns that into an age or a formatted timestamp.
+fn cached_usage_raw(config_dir: &Path) -> Option<(Usage, f64)> {
     let path = local_identity_path(config_dir)?;
     let raw = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -749,14 +775,45 @@ pub fn cached_usage(config_dir: &Path) -> Option<(Usage, u64)> {
     }
 
     let fetched_ms = cached.get("fetchedAtMs").and_then(|x| x.as_f64())?;
-    let now_ms = SystemTime::now()
+    Some((usage, fetched_ms))
+}
+
+/// Where a `usage --json` reading came from this invocation — the three
+/// states docs/machine-api.md's `usage --json` `source` field distinguishes.
+/// `NoToken`/`Offline`-with-no-cache both collapse into `Unavailable`: the
+/// machine contract has no separate "no token" state, since from a caller's
+/// perspective both mean the same thing — there is nothing trustworthy to
+/// show.
+pub enum UsageSource {
+    Live(Usage, u64),
+    Cache(Usage, u64),
+    Unavailable,
+}
+
+/// `fetch_account_usage`, but carrying the actual observation timestamp a
+/// `--json` caller needs instead of only an age, and collapsing `NoToken`/
+/// `Offline`-with-no-cache into one `Unavailable` state (the machine
+/// contract's three-state `source` vocabulary).
+pub fn fetch_account_usage_detail(token_dir: &Path) -> UsageSource {
+    let Some(token) = read_token(token_dir) else {
+        return UsageSource::Unavailable;
+    };
+    if let Some(usage) = fetch_usage(&token) {
+        return UsageSource::Live(usage, now_secs());
+    }
+    match cached_usage_detail(token_dir) {
+        Some((usage, fetched_at, _age)) => UsageSource::Cache(usage, fetched_at),
+        None => UsageSource::Unavailable,
+    }
+}
+
+/// Current wall-clock time as Unix epoch seconds, saturating to `0` rather
+/// than panicking on a clock set before 1970.
+pub(crate) fn now_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis() as f64;
-    // A clock that has gone backwards since the write would make this
-    // negative; report it as fresh rather than as an absurd age.
-    let age = ((now_ms - fetched_ms).max(0.0) / 1000.0) as u64;
-    Some((usage, age))
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Read the token for `token_dir` (a managed account dir or `~/.claude/`) and
@@ -876,6 +933,40 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Inverse of `days_from_civil`: a proleptic-Gregorian `(year, month, day)`
+/// from days since the Unix epoch. Howard Hinnant's `civil_from_days`.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Format Unix epoch seconds as an ISO-8601 UTC timestamp
+/// (`"2026-06-10T12:20:01Z"`) — the wire format every `--json` command's
+/// `fetched_at`/`resets_at`-shaped fields use. No fractional seconds; `resets_at`
+/// values are passed through from upstream as-is rather than reformatted.
+pub fn epoch_to_iso8601(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86_400) as i64;
+    let rem = epoch_secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m,
+        d,
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -1103,6 +1194,65 @@ mod tests {
     fn iso_to_epoch_rejects_garbage() {
         assert_eq!(iso_to_epoch("not-a-timestamp"), None);
         assert_eq!(iso_to_epoch(""), None);
+    }
+
+    #[test]
+    fn epoch_to_iso8601_epoch_zero() {
+        assert_eq!(epoch_to_iso8601(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn epoch_to_iso8601_is_the_exact_inverse_of_iso_to_epoch() {
+        for s in [
+            "2026-06-10T12:20:01Z",
+            "2000-02-29T00:00:00Z", // leap day
+            "1999-12-31T23:59:59Z",
+            "2100-01-01T00:00:00Z",
+        ] {
+            let secs = iso_to_epoch(s).expect("fixture parses") as u64;
+            assert_eq!(epoch_to_iso8601(secs), s, "round-trip of {s}");
+        }
+    }
+
+    // --- cached_usage_detail ---
+
+    #[test]
+    fn cached_usage_detail_reports_the_actual_observation_time_not_just_an_age() {
+        let dir = cached_usage_dir("detail");
+        let fetched_at = now_secs() - 600;
+        write_cached(&dir, 600.0, Some("u-1"), Some("u-1"));
+        let (usage, fetched_at_secs, age) =
+            cached_usage_detail(&dir).expect("a stamped, matching reading is usable");
+        assert_eq!(usage.five_hour.unwrap().utilization, 32.0);
+        // `write_cached` stamps `fetchedAtMs` from `now_ms() - age_secs*1000`,
+        // computed independently of `now_secs()` above — allow a touch of
+        // slack for the time the test itself took.
+        assert!(
+            fetched_at_secs.abs_diff(fetched_at) <= 2,
+            "fetched_at_secs {fetched_at_secs} vs expected {fetched_at}"
+        );
+        assert!((599..=605).contains(&age), "age was {age}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_usage_detail_refuses_a_mismatched_identity_like_cached_usage_does() {
+        let dir = cached_usage_dir("detail-mismatch");
+        write_cached(&dir, 60.0, Some("u-old"), Some("u-new"));
+        assert!(cached_usage_detail(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- fetch_account_usage_detail ---
+
+    #[test]
+    fn fetch_account_usage_detail_is_unavailable_with_no_token_and_no_cache() {
+        let dir = cached_usage_dir("fetch-detail-unavailable");
+        match fetch_account_usage_detail(&dir) {
+            UsageSource::Unavailable => {}
+            _ => panic!("expected Unavailable for a dir with no token and no cache"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

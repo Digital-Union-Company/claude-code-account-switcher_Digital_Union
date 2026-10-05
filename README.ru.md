@@ -68,7 +68,7 @@ claude-acc link work
 | Команда | Описание |
 | --- | --- |
 | `claude-acc` | Справка |
-| `claude-acc list` | Список всех аккаунтов |
+| `claude-acc list [--json]` | Список всех аккаунтов |
 | `claude-acc add <имя>` | Добавить аккаунт (запустит `claude login`); добавьте `-s` / `--seed` чтобы засеять из `~/.claude/` |
 | `claude-acc clone-settings <имя>` | Скопировать `settings.json` / `CLAUDE.md` / `agents/` / `plugins/` и т.д. из `~/.claude/` в существующий аккаунт |
 | `claude-acc import <имя> <путь>` | Усыновить существующую config-папку как аккаунт (без релогина); `--move` чтобы перенести |
@@ -78,9 +78,9 @@ claude-acc link work
 | `claude-acc reset` | Сбросить дефолт на `~/.claude/` |
 | `claude-acc link <имя>` | Привязать аккаунт к текущей директории |
 | `claude-acc unlink` | Убрать привязку с текущей директории |
-| `claude-acc links` | Показать все привязки директорий |
-| `claude-acc status` | Показать активный аккаунт |
-| `claude-acc usage` | Показать использование лимитов 5ч / 7д по всем аккаунтам |
+| `claude-acc links [--json]` | Показать все привязки директорий |
+| `claude-acc status [--json] [--path <dir>]` | Показать активный аккаунт |
+| `claude-acc usage [--json]` | Показать использование лимитов 5ч / 7д по всем аккаунтам |
 | `claude-acc sessions [--all]` | Список сессий Claude Code по всем аккаунтам (по умолчанию — для текущей директории) |
 | `claude-acc session copy <id\|имя> --to <имя>` | Скопировать сессию в другой аккаунт, чтобы `claude --resume` её увидел |
 | `claude-acc resume-hook [on\|off]` | Показать/задать, действует ли та же проверка для голого `claude --resume <id>` |
@@ -168,6 +168,7 @@ README — это обзор. У каждой темы своя страница
 | Показать активный аккаунт в статус-панели Claude Code | [Статус-панель](docs/ru/statusline.md) |
 | Запустить облачную работу или перенести облачную сессию в терминал под выбранным аккаунтом | [Облачные сессии и teleport](docs/ru/cloud.md) |
 | Сравнить с cswap, aisw и рецептом на direnv | [Сравнение с другими инструментами](docs/ru/comparison.md) |
+| Писать скрипты или GUI против `list`/`doctor`/`status`/`links`/`usage --json` | [Машинный API](docs/ru/machine-api.md) |
 
 ## Язык
 

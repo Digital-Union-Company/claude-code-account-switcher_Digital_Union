@@ -86,6 +86,18 @@ fn chrome_off(
 pub fn run(config: &AppConfig, i18n: &I18n, json: bool) -> i32 {
     let accounts = match config.list_accounts() {
         Ok(v) => v,
+        // The human form keeps its existing bare-exit behaviour; the `--json`
+        // form must still produce the one structured document the stdout
+        // invariant requires rather than exiting silently (this is an
+        // operational failure, rule 4(A) — never the semantic exit code
+        // below, which assumes a document was actually built).
+        Err(e) if json => {
+            return crate::machine::error(
+                "CONFIG_STORE_UNREADABLE",
+                &e.to_string(),
+                serde_json::json!({}),
+            );
+        }
         Err(_) => return 1,
     };
 
@@ -306,6 +318,7 @@ fn run_json(config: &AppConfig, accounts: &[String], standard_present: bool) -> 
             Some(default_acc.as_deref() == Some(acc.as_str())),
         );
         add_lock_fields(config, acc.as_str(), &mut entry);
+        add_machine_fields(&mut entry, &acc_dir);
         if entry["status"] == "offline" || entry["lock"] == "drift" {
             any_problem = true;
         }
@@ -322,6 +335,9 @@ fn run_json(config: &AppConfig, accounts: &[String], standard_present: bool) -> 
             None,
         );
         add_lock_fields(config, "default", &mut entry);
+        if let Some(dir) = identity::standard_token_dir() {
+            add_machine_fields(&mut entry, &dir);
+        }
         if entry["status"] == "offline" || entry["lock"] == "drift" {
             any_problem = true;
         }
@@ -331,6 +347,9 @@ fn run_json(config: &AppConfig, accounts: &[String], standard_present: bool) -> 
         // entry even when the account has no token to audit.
         let mut entry = build_entry("~/.claude/", AuditResult::NoToken, None);
         add_lock_fields(config, "default", &mut entry);
+        if let Some(dir) = identity::standard_token_dir() {
+            add_machine_fields(&mut entry, &dir);
+        }
         if entry["lock"] == "drift" {
             any_problem = true;
         }
@@ -340,12 +359,29 @@ fn run_json(config: &AppConfig, accounts: &[String], standard_present: bool) -> 
     };
 
     let doc = serde_json::json!({
+        "schema_version": crate::machine::SCHEMA_VERSION,
+        "ok": true,
         "accounts": entries,
         "standard": standard,
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
 
     if any_problem { 1 } else { 0 }
+}
+
+/// Add `chrome_enabled`/`config_dir` to an entry — CM0.5's additive doctor
+/// fields, same semantics as `list --json`'s (docs/machine-api.md §1/§2).
+fn add_machine_fields(entry: &mut serde_json::Value, config_dir: &std::path::Path) {
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert(
+            "chrome_enabled".to_string(),
+            serde_json::json!(crate::chrome::enabled(config_dir)),
+        );
+        obj.insert(
+            "config_dir".to_string(),
+            serde_json::json!(config_dir.display().to_string()),
+        );
+    }
 }
 
 /// Add `lock` and `pinned_uuid` to an entry. Separate from `build_entry`
@@ -507,5 +543,54 @@ mod tests {
         std::fs::create_dir_all(config.account_path("fresh")).unwrap();
         rows.push(("fresh".to_string(), AuditResult::NoToken));
         assert_eq!(chrome_off(&config, &rows, "~/.claude/"), None);
+    }
+
+    // --- CM0.5 additive machine-mode fields ---
+
+    #[test]
+    fn add_machine_fields_inserts_chrome_enabled_and_config_dir() {
+        let config = chrome_scratch("machine-fields");
+        let dir = config.account_path("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".claude.json"),
+            r#"{"claudeInChromeDefaultEnabled": true}"#,
+        )
+        .unwrap();
+
+        let mut entry = build_entry("work", AuditResult::NoToken, Some(false));
+        add_machine_fields(&mut entry, &dir);
+        assert_eq!(entry["chrome_enabled"], true);
+        assert_eq!(entry["config_dir"], dir.display().to_string());
+    }
+
+    #[test]
+    fn add_machine_fields_reports_null_chrome_enabled_for_a_dir_with_no_config_yet() {
+        let config = chrome_scratch("machine-fields-fresh");
+        let dir = config.account_path("fresh");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut entry = build_entry("fresh", AuditResult::NoToken, Some(false));
+        add_machine_fields(&mut entry, &dir);
+        assert_eq!(entry["chrome_enabled"], serde_json::Value::Null);
+    }
+
+    // A `--json` invocation must still produce the one structured document
+    // the stdout invariant requires even when claude-acc's own config store
+    // cannot be enumerated at all — the bare early-return this used to be
+    // left the human exit code (1) with nothing on stdout to explain it,
+    // which is exactly what rule 4(A)'s operational-failure envelope exists
+    // to prevent.
+    #[test]
+    fn run_json_on_an_unreadable_config_store_still_exits_nonzero() {
+        let config = chrome_scratch("unreadable");
+        // Replace the accounts directory with a plain file, so
+        // `list_accounts`'s `fs::read_dir` fails instead of seeing an empty
+        // directory.
+        std::fs::remove_dir_all(config.accounts_dir()).ok();
+        std::fs::write(config.accounts_dir(), "not a directory").unwrap();
+
+        let i18n = I18n { lang: Lang::En };
+        assert_eq!(run(&config, &i18n, true), 1);
     }
 }
