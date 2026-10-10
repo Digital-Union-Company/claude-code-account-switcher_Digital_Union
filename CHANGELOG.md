@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.21.0...v0.22.0) (2026-10-05)
+
+
+### Features
+
+* add machine-readable JSON APIs ([9c771ff](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/9c771ffb76d30f6ec49f159fa52cde87a1e08462))
+
 ## [0.21.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.20.0...v0.21.0) (2026-10-04)
 
 
