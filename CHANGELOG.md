@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.23.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.22.0...v0.23.0) (2026-10-10)
+
+
+### Features
+
+* add account-bound cloud and teleport commands ([#2](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/2)) ([4bcbe06](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/4bcbe06de669a2aa26ba868671d9fa8069c5fcce))
+* add machine-readable JSON APIs ([9c771ff](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/9c771ffb76d30f6ec49f159fa52cde87a1e08462))
+* add native Windows Claude account-routing shim ([#3](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/3)) ([c0f3309](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/c0f330910b59865bb8d581530e9e031359818753))
+
+
+### Bug Fixes
+
+* let a missing argument reach the usage message instead of killing the shell ([#148](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/148)) ([a34120d](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/a34120d2db7c8746771f7a6abd09e7f007fd15f9))
+* normalize Windows directory link identity ([#4](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/4)) ([491b272](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/491b2728f96cc1df7a69b5abbf4a67e420b88297))
+* secure Windows Claude launch substrate ([#1](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/1)) ([40f00ee](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/40f00ee49cab548b04a30e948205a75cd3d020a7))
+
+
+### Documentation
+
+* say that the status line meter is the context window, not the quota ([#146](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/146)) ([f85378f](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/f85378fec9a3a8a5d9de3721affae269cabf4d91))
+
 ## [0.22.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.21.0...v0.22.0) (2026-10-05)
 
 
