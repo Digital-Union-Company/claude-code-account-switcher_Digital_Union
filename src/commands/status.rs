@@ -93,7 +93,10 @@ pub fn run_json(config: &AppConfig, path: Option<&str>) -> i32 {
 /// Decide the absolute directory `status --json` should resolve, and
 /// validate it exists and is a directory. Pure given `cwd` — the one I/O
 /// `run_json` performs is reading the real cwd, done once by the caller.
-fn resolve_query_path(path: Option<&str>, cwd: &Path) -> Result<PathBuf, (&'static str, String)> {
+pub(crate) fn resolve_query_path(
+    path: Option<&str>,
+    cwd: &Path,
+) -> Result<PathBuf, (&'static str, String)> {
     let candidate = match path {
         Some(p) => {
             let pb = PathBuf::from(p);

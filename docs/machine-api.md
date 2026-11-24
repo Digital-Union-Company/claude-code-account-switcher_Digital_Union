@@ -2,8 +2,10 @@
 
 [← README](../README.md) · [Русский](ru/machine-api.md)
 
-Five commands — `list`, `doctor`, `status`, `links`, `usage` — have a `--json`
-mode meant for a script or another program to parse, not a human to read.
+Six commands have a `--json` mode meant for a script or another program to
+parse, not a human to read. Five are read-only — `list`, `doctor`, `status`,
+`links`, `usage` — and one is the single mutation the machine API exposes,
+`link --json`, which conditionally writes one directory→account routing link.
 This is the contract a tool like a GUI front-end builds against.
 
 ## The rules every `--json` command follows
@@ -275,6 +277,149 @@ $ claude-acc usage --json
   way.
 - Same account visibility as `list --json`: the standard account appears
   only once it has actually been used.
+
+## `claude-acc link --json --path <DIR> --account <ACCOUNT>`
+
+The **one mutation** in the machine API: it makes `<DIR>`'s own exact link name
+`<ACCOUNT>`, so `status --json` for `<DIR>` then resolves `<ACCOUNT>` by an
+exact link of its own. Built for a GUI that wants to apply its registry's
+account onto claude-acc's routing, as a single conditional write — never a
+`unlink`-then-`link` sequence a consumer drives itself.
+
+It requires **exactly one** of two modes, and both `--path` and `--account`:
+
+- `--dry-run` — resolve, plan, and return an `expected_state` token. Writes
+  nothing.
+- `--expect-state <token>` — commit, but only if the routing state still matches
+  that token from a prior `--dry-run`.
+
+A machine mutation is therefore never unconditional: the consumer previews,
+shows the user, and commits against the state the user actually saw.
+
+### Scope — exactly one link, nothing else
+
+It only ever adds, replaces, or leaves `<DIR>`'s own *exact-equivalent* link; a
+change collapses case/slash aliases of `<DIR>` to the single chosen entry (on
+Windows), while an already-correct exact link is left byte-for-byte untouched.
+Ancestor, descendant and unrelated links are never touched. Because routing is
+inherited — the nearest linked ancestor wins — writing an exact link for `<DIR>`
+**pins** it: a directory that previously inherited its account now has its own
+link, and a later change to the ancestor no longer moves it. The `before`/`after`
+routes make that visible. Writing an exact link for `<DIR>` changes `<DIR>`'s
+effective account and that of any descendant inheriting from it — it is one
+*stored* link, not necessarily one *effective* directory.
+
+claude-acc owns every routing and path-equivalence decision here (`src/resolve.rs`,
+`src/path_identity.rs`); a consumer passes the directory and account as strings
+and never compares paths or reads the links file itself.
+
+### Preview — `--dry-run`
+
+```bash
+$ claude-acc link --json --path /Users/alice/work/project-a --account work --dry-run
+{
+  "schema_version": 1,
+  "ok": true,
+  "dry_run": true,
+  "would_change": true,
+  "query_path": "/Users/alice/work/project-a",
+  "account": "work",
+  "before": { "resolved_account": "default", "source": "standard", "owning_link_path": null },
+  "after": { "resolved_account": "work", "source": "linked", "owning_link_path": "/Users/alice/work/project-a" },
+  "stored_link_path": "/Users/alice/work/project-a",
+  "expected_state": "42cfd5972ba543f2f876687273ffc9b737971b0b4589fc342d71cd4b95991f77"
+}
+```
+
+- `after` is the **projected** route (`dry_run: true` / `would_change`), not a
+  claim that anything was written.
+- `expected_state` is a 64-hex-character fingerprint of every routing-relevant
+  input — the directory, the account, the whole links store, the configured
+  default, and the account inventory. It is a conservative **state fingerprint,
+  not authentication and not a transaction id**: an identical restored state
+  produces an identical token, so it cannot tell "never changed" from "changed
+  and changed back" (an ABA change). It refuses on **any** routing-store change,
+  including ones unrelated to this directory. It carries no secret — only
+  directory strings, account names and the stored map. It fingerprints those
+  stored strings and the inventory, not live filesystem state: a symlink or
+  junction retarget of the directory between preview and commit is not reflected
+  in it. The post-write re-verification — not the token — is what guarantees
+  `<DIR>` ends up resolving to `<ACCOUNT>` by its own exact link.
+- `would_change` is `false` when `<DIR>` already has an exact link to
+  `<ACCOUNT>`. An *inherited* route that already resolves to `<ACCOUNT>` is
+  **not** a no-op: there is no exact link yet, so committing would still write
+  the pinning link, and `would_change` is `true`.
+
+### Commit — `--expect-state <token>`
+
+```bash
+$ claude-acc link --json --path /Users/alice/work/project-a --account work \
+    --expect-state 42cfd5972ba543f2f876687273ffc9b737971b0b4589fc342d71cd4b95991f77
+{
+  "schema_version": 1,
+  "ok": true,
+  "dry_run": false,
+  "changed": true,
+  "query_path": "/Users/alice/work/project-a",
+  "account": "work",
+  "before": { "resolved_account": "default", "source": "standard", "owning_link_path": null },
+  "after": { "resolved_account": "work", "source": "linked", "owning_link_path": "/Users/alice/work/project-a" },
+  "stored_link_path": "/Users/alice/work/project-a"
+}
+```
+
+- `after` here is the **verified** route, re-read from the store after the write.
+- A commit that finds the exact link already present is a **no-op success**:
+  `changed: false`, the store is not rewritten, and `before`/`after` are equal.
+
+### What refuses, and how
+
+Every refusal writes nothing and is an operational-failure envelope (`ok: false`,
+exit 1). Branch on `error.code`:
+
+- `STATE_CHANGED` — the `--expect-state` token no longer matches; the state the
+  user confirmed has moved. `details` carries the current `before` route.
+  Re-preview and decide again.
+- `AMBIGUOUS_LINK` — routing is already ambiguous for this directory (two
+  equivalent stored links naming different accounts). It is refused, never
+  silently healed; the store is left exactly as it was.
+- `ACCOUNT_NOT_FOUND` / `ACCOUNT_NAME_INVALID` — the account is not a managed
+  account (or the standard `default`), or is not a valid account name.
+- `PATH_NOT_FOUND` / `PATH_NOT_DIRECTORY` — as for `status --json`.
+- `PATH_NOT_REPRESENTABLE` — the directory cannot be stored losslessly in the
+  `dir=account` line format (e.g. it embeds a newline, or whitespace the parser
+  would trim). The store is never corrupted by a path it cannot represent.
+- `LINKS_STORE_INVALID` / `LINKS_STORE_UNREADABLE` — the store is malformed or
+  unreadable; a malformed store is refused, never rewritten by this path.
+- `LINKS_STORE_LOCKED` — another cooperating writer holds the routing lock; retry.
+- `LINKS_STORE_WRITE_FAILED` — the write itself failed; the store is unchanged.
+- `POSTCONDITION_FAILED` — the link was written but routing does not re-verify as
+  expected. The outcome is **uncertain**: the store may have changed, so this is
+  never reported as "unchanged", and it is **not** auto-rolled-back. Re-read
+  routing (`status --json`, `links --json`) and reconcile before any retry.
+- `INVALID_ARGUMENTS` — not exactly one of `--dry-run`/`--expect-state`, or
+  `--path`/`--account` missing.
+
+### Atomicity, locking, and who is bound
+
+- **Atomic store writes.** The links store (and the config file's `default=`)
+  are replaced via a same-directory temp file, fsync, then rename, so a reader
+  only ever sees the complete old or complete new store — never a torn one — and
+  a crash between steps leaves the previous store intact. This is
+  process-interruption safety, **not** a power-loss durability guarantee of the
+  rename metadata itself (the directory is not fsynced).
+- **One routing lock.** A single OS advisory lock serializes every writer of
+  routing-relevant state in *this binary* — the machine mutation, the human
+  `link`/`unlink`, and `default`/account-removal changes — so their
+  read-modify-writes can never interleave. It is released automatically when the
+  process exits, so a crashed holder leaves nothing stale, and nothing is ever
+  deleted by age.
+- **It binds only cooperating writers in this binary.** An *older* claude-acc
+  without the lock, a direct hand-edit of the links file, or the shell
+  integration (`claude-switch.sh`, which uses a different mechanism) are **not**
+  excluded. The `--expect-state` re-check is the backstop there: a racing
+  non-cooperating write changes the fingerprint, so the commit refuses with
+  `STATE_CHANGED` rather than overwriting it.
 
 ## Versioning
 
