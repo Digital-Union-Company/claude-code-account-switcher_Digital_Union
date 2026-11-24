@@ -12,24 +12,28 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
         i18n.print(Msg::NameInvalid);
         std::process::exit(1);
     }
-    if name != "default" && !config.account_exists(name) {
-        i18n.print(Msg::LinkNotFound(name.to_string()));
-        super::list::run(config, i18n);
-        std::process::exit(1);
-    }
 
     let dir = std::env::current_dir().expect("Cannot get current directory");
     let dir_str = dir.to_str().expect("Invalid directory path");
     let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or(dir_str);
 
-    config
-        .set_link(dir_str, name)
-        .expect("Failed to update links");
-
-    if name == "default" {
-        i18n.print(Msg::LinkDoneDefault(dir_name.to_string()));
-    } else {
-        i18n.print(Msg::LinkDone(dir_name.to_string(), name.to_string()));
+    // Validate the account exists and write the link together under the routing
+    // lock, so a concurrent `remove <name>` cannot be accepted between the check
+    // and the write and leave a link to a now-deleted account.
+    match config.link_checked(dir_str, name) {
+        Ok(true) => {
+            if name == "default" {
+                i18n.print(Msg::LinkDoneDefault(dir_name.to_string()));
+            } else {
+                i18n.print(Msg::LinkDone(dir_name.to_string(), name.to_string()));
+            }
+        }
+        Ok(false) => {
+            i18n.print(Msg::LinkNotFound(name.to_string()));
+            super::list::run(config, i18n);
+            std::process::exit(1);
+        }
+        Err(_) => panic!("Failed to update links"),
     }
 }
 
@@ -52,9 +56,11 @@ fn state_token(
     links: &[(String, String)],
     default: Option<&str>,
     accounts: &[String],
+    before: &EffectiveRoute,
+    exact_entry: Option<&(String, String)>,
 ) -> String {
     let mut h = Sha256::new();
-    h.update(b"claude-acc-link-state-v1\0");
+    h.update(b"claude-acc-link-state-v2\0");
     h.update(dir.as_bytes());
     h.update([0]);
     h.update(account.as_bytes());
@@ -74,27 +80,31 @@ fn state_token(
         h.update(acc.as_bytes());
         h.update([0]);
     }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// The account of `dir`'s own exact-equivalent link, if it has exactly one.
-/// `None` means no exact link for `dir` (it inherits, defaults, or is
-/// standard) — which is deliberately NOT the same as "already routes to the
-/// account" (see docs/machine-api.md). Callers only reach this once ambiguity
-/// has already been refused, so a conflicting equivalence class cannot occur
-/// here.
-fn exact_equivalent_account(links: &[(String, String)], dir: &str) -> Option<String> {
-    let mut found: Option<&str> = None;
-    for (stored, account) in links {
-        if path_identity::equivalent(stored, dir) {
-            match found {
-                None => found = Some(account),
-                Some(existing) if existing != account => return None,
-                _ => {}
-            }
+    // The actual routing INTERPRETATION, not only the textual store: `before`
+    // is claude-acc's resolved effective route, and `exact_entry` is dir's own
+    // exact-equivalence class as the resolver sees it now. Both come from the
+    // resolver and `path_identity`, which can consult live filesystem identity
+    // (`canonicalize`), so a reparse/symlink retarget that changes how dir is
+    // interpreted — without changing any stored string — still flips the token
+    // and refuses the commit, rather than acting on a stale interpretation.
+    h.update(b"before\0");
+    h.update(before.resolved_account.as_bytes());
+    h.update([0]);
+    h.update(before.source.as_str().as_bytes());
+    h.update([0]);
+    h.update(before.owning_link_path.as_deref().unwrap_or("").as_bytes());
+    h.update([0]);
+    h.update(b"exact\0");
+    match exact_entry {
+        Some((stored, acc)) => {
+            h.update(stored.as_bytes());
+            h.update(b"=");
+            h.update(acc.as_bytes());
         }
+        None => h.update(b"<none>"),
     }
-    found.map(str::to_string)
+    h.update([0]);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Whether `dir=account` survives a round-trip through the links-file format
@@ -187,6 +197,17 @@ pub fn run_json(
         );
     }
 
+    // The machine path never initializes the store (main.rs skips init for it),
+    // so an absent store is a structured refusal — never a baseline this command
+    // (including a dry-run) manufactures as a side effect.
+    if !config.links_path().exists() {
+        return machine::error(
+            "NOT_INITIALIZED",
+            "claude-acc has no routing store yet; run a claude-acc command to initialize it first",
+            json!({}),
+        );
+    }
+
     // One lock for the whole read → plan → write → verify. Bounded: a busy lock
     // is a cooperating writer mid-transaction, reported rather than waited on.
     let _lock = match config.try_lock_routing() {
@@ -261,8 +282,29 @@ pub fn run_json(
         }
     };
 
-    let current_token = state_token(dir, account, &links, default.as_deref(), &accounts);
-    let already_exact = exact_equivalent_account(&links, dir).as_deref() == Some(account);
+    let exact_entry = AppConfig::exact_equivalent_entry(&links, dir);
+    let already_exact = exact_entry.as_ref().map(|(_, a)| a.as_str()) == Some(account);
+    let current_token = state_token(
+        dir,
+        account,
+        &links,
+        default.as_deref(),
+        &accounts,
+        &before,
+        exact_entry.as_ref(),
+    );
+
+    // The path reported as the stored link: for a no-op it is the entry's own
+    // spelling as actually stored (which may be a case/slash variant of the
+    // query path on Windows); for a change it is the query path being written.
+    let stored_link_path: &str = if already_exact {
+        exact_entry
+            .as_ref()
+            .map(|(stored, _)| stored.as_str())
+            .unwrap_or(dir)
+    } else {
+        dir
+    };
 
     // The route an exact `dir=account` link would produce. The account is
     // already proven to exist (or be the standard account), so this is the
@@ -281,7 +323,7 @@ pub fn run_json(
             "account": account,
             "before": route_json(&before),
             "after": route_json(if already_exact { &before } else { &planned_after }),
-            "stored_link_path": dir,
+            "stored_link_path": stored_link_path,
             "expected_state": current_token,
         }));
     }
@@ -308,8 +350,26 @@ pub fn run_json(
             "account": account,
             "before": route_json(&before),
             "after": route_json(&before),
-            "stored_link_path": dir,
+            "stored_link_path": stored_link_path,
         }));
+    }
+
+    // Conservative pre-replacement re-read. Cooperating writers are locked out,
+    // but a NON-cooperating write (an older binary, a hand-edit, the shell
+    // integration — none of which take this lock) could have landed since the
+    // read above. If the links store changed under us, refuse rather than
+    // clobber it. This NARROWS, and does not close, the window: a non-cooperating
+    // write between here and the rename is still possible, which the post-write
+    // verification below is the final guard against.
+    match config.read_links_strict() {
+        Ok(StrictLinksRead::Ok(current)) if current == links => {}
+        _ => {
+            return machine::error(
+                "STATE_CHANGED",
+                "the routing store changed during the operation; nothing was changed — re-check and decide again",
+                json!({ "query_path": dir, "account": account }),
+            );
+        }
     }
 
     // Write only this directory's exact link: drop its equivalent entries, add
@@ -341,7 +401,7 @@ pub fn run_json(
                 "account": account,
                 "before": route_json(&before),
                 "after": route_json(&after),
-                "stored_link_path": dir,
+                "stored_link_path": stored_link_path,
             }))
         }
         Ok(after) => machine::error(
@@ -393,40 +453,69 @@ mod tests {
         let links = config.all_links().unwrap();
         let default = config.get_default().unwrap();
         let accounts = config.list_accounts().unwrap();
-        state_token(dir, account, &links, default.as_deref(), &accounts)
+        let before = resolve::effective_route(config, std::path::Path::new(dir)).unwrap();
+        let exact = AppConfig::exact_equivalent_entry(&links, dir);
+        state_token(
+            dir,
+            account,
+            &links,
+            default.as_deref(),
+            &accounts,
+            &before,
+            exact.as_ref(),
+        )
+    }
+
+    fn standard_route() -> EffectiveRoute {
+        EffectiveRoute {
+            resolved_account: "default".to_string(),
+            source: RouteSource::Standard,
+            owning_link_path: None,
+        }
     }
 
     // --- pure helpers ---
 
     #[test]
     fn state_token_is_stable_for_identical_inputs_and_moves_on_any_change() {
+        let before = standard_route();
+        let links = vec![("/p".to_string(), "work".to_string())];
+        let accts = vec!["work".to_string()];
+        let exact = Some(("/p".to_string(), "work".to_string()));
         let base = state_token(
             "/p",
             "work",
-            &[("/p".into(), "work".into())],
+            &links,
             Some("work"),
-            &["work".into()],
+            &accts,
+            &before,
+            exact.as_ref(),
         );
         assert_eq!(
             base,
             state_token(
                 "/p",
                 "work",
-                &[("/p".into(), "work".into())],
+                &links,
                 Some("work"),
-                &["work".into()]
+                &accts,
+                &before,
+                exact.as_ref()
             ),
             "same inputs must hash the same"
         );
-        // Every routing-relevant input flips the token.
+        // Every routing-relevant input flips the token: directory, account, the
+        // stored links, the configured default, and the account inventory.
         assert_ne!(
             base,
             state_token(
                 "/q",
                 "work",
-                &[("/p".into(), "work".into())],
+                &links,
                 Some("work"),
-                &["work".into()]
+                &accts,
+                &before,
+                exact.as_ref()
             )
         );
         assert_ne!(
@@ -434,9 +523,11 @@ mod tests {
             state_token(
                 "/p",
                 "home",
-                &[("/p".into(), "work".into())],
+                &links,
                 Some("work"),
-                &["work".into()]
+                &accts,
+                &before,
+                exact.as_ref()
             )
         );
         assert_ne!(
@@ -444,9 +535,11 @@ mod tests {
             state_token(
                 "/p",
                 "work",
-                &[("/p".into(), "home".into())],
+                &[("/p".to_string(), "home".to_string())],
                 Some("work"),
-                &["work".into()]
+                &accts,
+                &before,
+                exact.as_ref()
             )
         );
         assert_ne!(
@@ -454,59 +547,73 @@ mod tests {
             state_token(
                 "/p",
                 "work",
-                &[("/p".into(), "work".into())],
+                &links,
                 Some("home"),
-                &["work".into()]
+                &accts,
+                &before,
+                exact.as_ref()
             )
+        );
+        assert_ne!(
+            base,
+            state_token("/p", "work", &links, None, &accts, &before, exact.as_ref())
         );
         assert_ne!(
             base,
             state_token(
                 "/p",
                 "work",
-                &[("/p".into(), "work".into())],
-                None,
-                &["work".into()]
-            )
-        );
-        assert_ne!(
-            base,
-            state_token(
-                "/p",
-                "work",
-                &[("/p".into(), "work".into())],
+                &links,
                 Some("work"),
-                &["work".into(), "home".into()]
+                &["work".to_string(), "home".to_string()],
+                &before,
+                exact.as_ref()
             )
+        );
+        // And the bound routing INTERPRETATION flips it too: a different resolved
+        // before-route, or a different exact-equivalence entry.
+        let other_route = EffectiveRoute {
+            resolved_account: "work".to_string(),
+            source: RouteSource::Linked,
+            owning_link_path: Some("/p".to_string()),
+        };
+        assert_ne!(
+            base,
+            state_token(
+                "/p",
+                "work",
+                &links,
+                Some("work"),
+                &accts,
+                &other_route,
+                exact.as_ref()
+            )
+        );
+        assert_ne!(
+            base,
+            state_token("/p", "work", &links, Some("work"), &accts, &before, None)
         );
     }
 
     #[test]
     fn state_token_separators_prevent_field_run_together_collisions() {
         // "a"+"b" must not hash the same as "ab"+"" for any field pair.
-        let a = state_token("a", "b", &[], None, &[]);
-        let b = state_token("ab", "", &[], None, &[]);
+        let r = standard_route();
+        let a = state_token("a", "b", &[], None, &[], &r, None);
+        let b = state_token("ab", "", &[], None, &[], &r, None);
         assert_ne!(a, b);
     }
 
     #[test]
-    fn exact_equivalent_account_distinguishes_absent_present_and_conflicting() {
-        assert_eq!(exact_equivalent_account(&[], "/p"), None);
+    fn exact_equivalent_entry_finds_the_dirs_own_link_only() {
+        assert_eq!(AppConfig::exact_equivalent_entry(&[], "/p"), None);
         assert_eq!(
-            exact_equivalent_account(&[("/p".into(), "work".into())], "/p").as_deref(),
-            Some("work")
+            AppConfig::exact_equivalent_entry(&[("/p".to_string(), "work".to_string())], "/p"),
+            Some(("/p".to_string(), "work".to_string()))
         );
         // A different directory's link is not this directory's exact link.
         assert_eq!(
-            exact_equivalent_account(&[("/other".into(), "work".into())], "/p"),
-            None
-        );
-        // Conflicting equivalence class -> None (ambiguity is refused upstream).
-        assert_eq!(
-            exact_equivalent_account(
-                &[("/p".into(), "work".into()), ("/p".into(), "home".into())],
-                "/p"
-            ),
+            AppConfig::exact_equivalent_entry(&[("/other".to_string(), "work".to_string())], "/p"),
             None
         );
     }
@@ -753,6 +860,76 @@ mod tests {
         let before = fs::read(config.links_path()).unwrap();
         assert_eq!(run_json(&config, Some(&p), Some("work"), true, None), 1);
         assert_eq!(fs::read(config.links_path()).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dry_run_on_an_uninitialized_store_refuses_without_creating_it() {
+        // F2: the machine path never initializes. A dry-run against a store that
+        // was never set up refuses with NOT_INITIALIZED and manufactures nothing.
+        let root = std::env::temp_dir().join(format!("cc-linkjson-uninit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let config = AppConfig {
+            base_dir: root.join("manager"),
+        }; // deliberately NOT init()'d
+        let p = project(&root, "proj");
+        assert_eq!(run_json(&config, Some(&p), Some("default"), true, None), 1);
+        assert!(
+            !config.links_path().exists(),
+            "the machine path must not create the store"
+        );
+        assert!(
+            !config.routing_lock_path().exists(),
+            "and must not even create the lock file for an uninitialized store"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_changed_default_between_preview_and_commit_is_a_state_change() {
+        // F3: the token binds the resolved before-route, not just the stored
+        // links. Changing the default moves a standard directory's route, so a
+        // commit with the pre-change token is refused even though no link text
+        // changed.
+        let (root, config) = scratch("f3-default");
+        account(&config, "work");
+        account(&config, "home");
+        let p = project(&root, "proj"); // no link, no default -> standard route
+        let token = token_now(&config, &p, "work");
+        config.set_default("home").unwrap(); // alters p's before-route
+        assert_eq!(
+            run_json(&config, Some(&p), Some("work"), false, Some(&token)),
+            1
+        );
+        assert!(config.all_links().unwrap().is_empty(), "nothing written");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_non_cooperating_write_during_the_transaction_is_refused_not_clobbered() {
+        // F5: the conservative pre-replacement re-read. Simulate a write that
+        // landed after the initial read by changing the store, then committing
+        // with a token computed before that change: STATE_CHANGED, the other
+        // write survives.
+        let (root, config) = scratch("f5-recheck");
+        account(&config, "work");
+        account(&config, "home");
+        let p = project(&root, "proj");
+        let other = project(&root, "other");
+        let token = token_now(&config, &p, "work");
+        // A concurrent (here, interleaved) non-cooperating write to an unrelated
+        // directory changes the whole-store fingerprint.
+        config.set_link(&other, "home").unwrap();
+        assert_eq!(
+            run_json(&config, Some(&p), Some("work"), false, Some(&token)),
+            1
+        );
+        assert_eq!(
+            config.all_links().unwrap(),
+            vec![(other, "home".to_string())],
+            "the other write must survive; ours must not have been applied"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

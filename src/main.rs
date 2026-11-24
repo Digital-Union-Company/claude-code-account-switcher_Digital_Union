@@ -434,20 +434,29 @@ fn main() {
     let cli = Cli::parse();
     let config = AppConfig::new();
     let machine_mode = is_machine_mode(&cli.command);
-    match config.init() {
-        Ok(()) => {}
-        // A `--json` invocation must still produce its one structured JSON
-        // document on stdout rather than panicking before it gets the
-        // chance (docs/machine-api.md's stdout invariant applies even when
-        // claude-acc's own config store cannot be set up).
-        Err(e) if machine_mode => {
-            std::process::exit(machine::error(
-                "CONFIG_STORE_UNREADABLE",
-                &e.to_string(),
-                serde_json::json!({}),
-            ));
+    // The machine mutation (`link --json`) deliberately does NOT initialize:
+    // creating the config/links baseline or running the legacy migration is a
+    // routing-state write, and a dry-run must never manufacture one as a side
+    // effect. Its own handler refuses a missing store with a structured
+    // `NOT_INITIALIZED` instead (docs/machine-api.md). Every other command,
+    // including the read-only `--json` ones, still initializes as before.
+    let machine_link = matches!(cli.command, Some(Commands::Link { json: true, .. }));
+    if !machine_link {
+        match config.init() {
+            Ok(()) => {}
+            // A `--json` invocation must still produce its one structured JSON
+            // document on stdout rather than panicking before it gets the
+            // chance (docs/machine-api.md's stdout invariant applies even when
+            // claude-acc's own config store cannot be set up).
+            Err(e) if machine_mode => {
+                std::process::exit(machine::error(
+                    "CONFIG_STORE_UNREADABLE",
+                    &e.to_string(),
+                    serde_json::json!({}),
+                ));
+            }
+            Err(e) => panic!("Failed to initialize config directory: {e}"),
         }
-        Err(e) => panic!("Failed to initialize config directory: {e}"),
     }
     let i18n = I18n::new();
     let show_hint = should_show_update_hint(&cli.command);

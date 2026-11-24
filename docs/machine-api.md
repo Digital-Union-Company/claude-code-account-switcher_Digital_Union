@@ -391,6 +391,9 @@ exit 1). Branch on `error.code`:
   would trim). The store is never corrupted by a path it cannot represent.
 - `LINKS_STORE_INVALID` / `LINKS_STORE_UNREADABLE` — the store is malformed or
   unreadable; a malformed store is refused, never rewritten by this path.
+- `NOT_INITIALIZED` — claude-acc has no routing store yet. This verb never
+  creates one (so a dry-run has no side effect); initialize it by running any
+  other claude-acc command first.
 - `LINKS_STORE_LOCKED` — another cooperating writer holds the routing lock; retry.
 - `LINKS_STORE_WRITE_FAILED` — the write itself failed; the store is unchanged.
 - `POSTCONDITION_FAILED` — the link was written but routing does not re-verify as
@@ -414,12 +417,34 @@ exit 1). Branch on `error.code`:
   read-modify-writes can never interleave. It is released automatically when the
   process exits, so a crashed holder leaves nothing stale, and nothing is ever
   deleted by age.
-- **It binds only cooperating writers in this binary.** An *older* claude-acc
-  without the lock, a direct hand-edit of the links file, or the shell
-  integration (`claude-switch.sh`, which uses a different mechanism) are **not**
-  excluded. The `--expect-state` re-check is the backstop there: a racing
-  non-cooperating write changes the fingerprint, so the commit refuses with
-  `STATE_CHANGED` rather than overwriting it.
+- **It binds only cooperating writers in this binary, and the limits are
+  exact.** An *older* claude-acc without the lock, a direct hand-edit of the
+  links file, or the shell integration (`claude-switch.sh`, a different
+  mechanism) are **not** serialized by it. The defences against a
+  non-cooperating write are layered, and so are their gaps:
+  - A change visible **before** the commit's expected-state comparison, or one
+    that lands **between** that comparison and the final write, is caught — by
+    the token check and by a second conservative re-read taken immediately
+    before the replacement — and refused with `STATE_CHANGED`. The other write
+    survives.
+  - A non-cooperating write in the remaining window — **after** that last
+    re-read and **before** the atomic rename — is not detected in advance, and
+    that write is silently overwritten. The post-write re-verification still
+    catches a wrong *final* route (`POSTCONDITION_FAILED`), but it cannot
+    resurrect a concurrent write it clobbered. This window is narrowed, not
+    closed.
+  - A directory's filesystem identity changing outside the lock (a
+    reparse/junction retarget) is likewise not serialized; the token binds the
+    resolved route and exact-equivalence class to catch it at comparison time,
+    but not within that final window.
+  - Because the token is a state *fingerprint*, an ABA change — a value changed
+    and then restored identically — is indistinguishable from no change.
+  - **Operational prerequisite:** a consumer must not drive this verb against a
+    store another non-cooperating writer (an older binary, the shell
+    integration, a hand-edit, an external tool) is concurrently mutating. Within
+    this binary's own commands the lock makes that safe; across those other
+    writers it is the caller's responsibility, and the guarantee degrades to the
+    layered best-effort above.
 
 ## Versioning
 

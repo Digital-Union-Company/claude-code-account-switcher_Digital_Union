@@ -31,12 +31,25 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, seed_from_default: bool)
     }
 
     let acc_dir = config.account_path(name);
-    if acc_dir.is_dir() {
+    // Reserving the account name — the existence check plus the directory
+    // creation — is a routing-relevant inventory write, so it runs under the
+    // routing lock: a concurrent machine `link --json` resolving an account
+    // sees a consistent inventory, and two `add`s of the same name cannot both
+    // pass the existence check. The interactive/network login below is NOT
+    // under the lock.
+    let created = config
+        .with_routing_lock(|| {
+            if acc_dir.is_dir() {
+                return Ok(false);
+            }
+            fs::create_dir_all(&acc_dir)?;
+            Ok(true)
+        })
+        .expect("Failed to create account directory");
+    if !created {
         i18n.print(Msg::AddExists(name.to_string()));
         std::process::exit(1);
     }
-
-    fs::create_dir_all(&acc_dir).expect("Failed to create account directory");
     ide::ensure_account_symlink(&acc_dir).ok();
 
     // Seed before printing AddCreated, so the copy report is logically
