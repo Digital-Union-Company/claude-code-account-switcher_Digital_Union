@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.22.0...v0.23.0) (2026-11-25)
+
+
+### Features
+
+* **machine-api:** add conditional atomic `link --json` routing mutation ([44f0913](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/44f091395a3639934ad206b333e9a5eb464a7bef))
+
 ## [0.22.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.21.0...v0.22.0) (2026-10-05)
 
 
