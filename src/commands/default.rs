@@ -24,13 +24,18 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: Option<&str>) {
                 i18n.print(Msg::NameInvalid);
                 std::process::exit(1);
             }
-            if !config.account_exists(name) {
-                i18n.print(Msg::DefaultNotFound(name.to_string()));
-                super::list::run(config, i18n);
-                std::process::exit(1);
+            // Existence check and write happen together under the routing lock,
+            // so a concurrent `remove` of this account cannot slip between them
+            // and leave the default pointing at an account that is gone.
+            match config.set_default_checked(name) {
+                Ok(true) => i18n.print(Msg::DefaultSet(name.to_string())),
+                Ok(false) => {
+                    i18n.print(Msg::DefaultNotFound(name.to_string()));
+                    super::list::run(config, i18n);
+                    std::process::exit(1);
+                }
+                Err(_) => panic!("Failed to update config"),
             }
-            config.set_default(name).expect("Failed to update config");
-            i18n.print(Msg::DefaultSet(name.to_string()));
         }
     }
 }

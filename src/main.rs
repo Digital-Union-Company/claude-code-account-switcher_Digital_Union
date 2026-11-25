@@ -102,8 +102,33 @@ enum Commands {
     Default { name: Option<String> },
     /// Reset default to ~/.claude/
     Reset,
-    /// Link account to current directory
-    Link { name: String },
+    /// Link account to current directory (human), or conditionally apply a
+    /// directory→account routing link for a machine consumer with `--json`.
+    Link {
+        /// Account to link the current directory to (human mode).
+        #[arg(required_unless_present = "json")]
+        name: Option<String>,
+        /// Machine mode: emit one JSON document and perform the conditional
+        /// routing mutation contract (docs/machine-api.md).
+        #[arg(long)]
+        json: bool,
+        /// Directory to link instead of the current one (requires --json).
+        #[arg(long, requires = "json")]
+        path: Option<String>,
+        /// Account to link the directory to (requires --json).
+        #[arg(long, requires = "json")]
+        account: Option<String>,
+        /// Preview only: resolve, plan and return an expected-state token
+        /// without writing (requires --json; mutually exclusive with
+        /// --expect-state).
+        #[arg(long, requires = "json")]
+        dry_run: bool,
+        /// Commit, conditional on the routing state still matching this token
+        /// from a prior --dry-run (requires --json; mutually exclusive with
+        /// --dry-run).
+        #[arg(long, requires = "json")]
+        expect_state: Option<String>,
+    },
     /// Unlink current directory
     Unlink,
     /// Show all directory links
@@ -347,8 +372,9 @@ enum SessionCommands {
     },
 }
 
-/// Whether `command` is a `--json` machine-mode invocation of one of the five
-/// machine-API commands (docs/machine-api.md). Centralized here so the
+/// Whether `command` is a `--json` machine-mode invocation of a machine-API
+/// command (docs/machine-api.md) — the five read-only ones and the one
+/// mutation verb (`link --json`). Centralized here so the
 /// stdout-is-exactly-one-JSON-document invariant has exactly one place that
 /// decides it, rather than a per-command "remember not to print the hint"
 /// rule that could quietly stop covering a new command.
@@ -360,6 +386,7 @@ fn is_machine_mode(command: &Option<Commands>) -> bool {
             | Some(Commands::Links { json: true })
             | Some(Commands::Usage { json: true })
             | Some(Commands::Doctor { json: true })
+            | Some(Commands::Link { json: true, .. })
     )
 }
 
@@ -407,20 +434,29 @@ fn main() {
     let cli = Cli::parse();
     let config = AppConfig::new();
     let machine_mode = is_machine_mode(&cli.command);
-    match config.init() {
-        Ok(()) => {}
-        // A `--json` invocation must still produce its one structured JSON
-        // document on stdout rather than panicking before it gets the
-        // chance (docs/machine-api.md's stdout invariant applies even when
-        // claude-acc's own config store cannot be set up).
-        Err(e) if machine_mode => {
-            std::process::exit(machine::error(
-                "CONFIG_STORE_UNREADABLE",
-                &e.to_string(),
-                serde_json::json!({}),
-            ));
+    // The machine mutation (`link --json`) deliberately does NOT initialize:
+    // creating the config/links baseline or running the legacy migration is a
+    // routing-state write, and a dry-run must never manufacture one as a side
+    // effect. Its own handler refuses a missing store with a structured
+    // `NOT_INITIALIZED` instead (docs/machine-api.md). Every other command,
+    // including the read-only `--json` ones, still initializes as before.
+    let machine_link = matches!(cli.command, Some(Commands::Link { json: true, .. }));
+    if !machine_link {
+        match config.init() {
+            Ok(()) => {}
+            // A `--json` invocation must still produce its one structured JSON
+            // document on stdout rather than panicking before it gets the
+            // chance (docs/machine-api.md's stdout invariant applies even when
+            // claude-acc's own config store cannot be set up).
+            Err(e) if machine_mode => {
+                std::process::exit(machine::error(
+                    "CONFIG_STORE_UNREADABLE",
+                    &e.to_string(),
+                    serde_json::json!({}),
+                ));
+            }
+            Err(e) => panic!("Failed to initialize config directory: {e}"),
         }
-        Err(e) => panic!("Failed to initialize config directory: {e}"),
     }
     let i18n = I18n::new();
     let show_hint = should_show_update_hint(&cli.command);
@@ -453,7 +489,27 @@ fn main() {
         }
         Some(Commands::Default { name }) => commands::default::run(&config, &i18n, name.as_deref()),
         Some(Commands::Reset) => commands::reset::run(&config, &i18n),
-        Some(Commands::Link { name }) => commands::link::run(&config, &i18n, &name),
+        Some(Commands::Link {
+            json: true,
+            path,
+            account,
+            dry_run,
+            expect_state,
+            ..
+        }) => std::process::exit(commands::link::run_json(
+            &config,
+            path.as_deref(),
+            account.as_deref(),
+            dry_run,
+            expect_state.as_deref(),
+        )),
+        // `name` is required_unless_present = "json", so human mode always has it.
+        Some(Commands::Link {
+            name: Some(name), ..
+        }) => commands::link::run(&config, &i18n, &name),
+        Some(Commands::Link { name: None, .. }) => {
+            unreachable!("clap requires a name without --json")
+        }
         Some(Commands::Unlink) => commands::unlink::run(&config, &i18n),
         Some(Commands::Links { json: true }) => {
             std::process::exit(commands::links::run_json(&config))

@@ -1,7 +1,73 @@
 use std::fmt;
-use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long a machine mutation waits to acquire the routing-store lock before
+/// reporting it busy (`LINKS_STORE_LOCKED`). Human commands wait without a
+/// bound (see [`AppConfig::lock_routing_blocking`]).
+pub const ROUTING_LOCK_TRY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Monotonic suffix so two atomic writes from one process never choose the
+/// same temp name. The exclusive create (`create_new`) is the real guard; this
+/// only keeps the common path collision-free.
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Replace `path` with `content` so a concurrent reader only ever sees the
+/// complete old file or the complete new one — never a half-written store.
+///
+/// Writes a sibling temp file on the *same* directory (so the final step is a
+/// same-filesystem rename, which is atomic on both Windows — `MoveFileExW`
+/// with replace — and Unix `rename(2)`), fsyncs the data before the rename,
+/// and removes the temp file on any failure. This guarantees **no torn or
+/// partial store is ever visible** and that a crash between steps leaves the
+/// previous store intact. It does **not** promise power-loss durability of the
+/// rename itself: the containing directory is not fsynced (there is no portable
+/// way to on Windows), so a power loss immediately after a successful rename
+/// may, on some platforms, lose the just-committed file and keep the old one —
+/// an old-or-new outcome, still never a torn one.
+fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
+    let seq = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    write_file_atomic_seq(path, content, seq)
+}
+
+/// The body of [`write_file_atomic`] with the temp-name sequence injected, so a
+/// test can occupy the exact temp name a write will choose and exercise the
+/// real `create_new` collision path. Production always calls it through
+/// [`write_file_atomic`] with the monotonic counter.
+fn write_file_atomic_seq(path: &Path, content: &str, seq: u64) -> io::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "store path has no parent directory",
+        )
+    })?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "store path has no file name")
+    })?;
+    let tmp = dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
+
+    // Exclusive create. A failure here — including a pre-existing temp of the
+    // same name — is returned WITHOUT touching that file: this operation did
+    // not create it and must never remove a temp it does not own. Only once
+    // `create_new` succeeds does the temp become ours to clean up.
+    let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+
+    let written = f
+        .write_all(content.as_bytes())
+        .and_then(|()| f.flush())
+        .and_then(|()| f.sync_all());
+    drop(f);
+    let result = written.and_then(|()| fs::rename(&tmp, path));
+
+    if result.is_err() {
+        // Our own temp, and the original store is untouched either way.
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
 
 /// Account names: ASCII letters, digits, hyphens, underscores. Rejects path
 /// separators, regex metacharacters, whitespace, and unicode — anything
@@ -67,7 +133,7 @@ impl From<io::Error> for LinkResolveError {
     }
 }
 
-fn parse_link_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_link_line(line: &str) -> Option<(String, String)> {
     let (directory, account) = line.rsplit_once('=')?;
     let directory = directory.trim();
     let account = account.trim();
@@ -99,6 +165,18 @@ pub enum StrictLinksRead {
 
 impl AppConfig {
     pub fn new() -> Self {
+        // CLAUDE_SWITCH_HOME overrides the store root (`base_dir`) directly. It
+        // exists so synthetic, fully isolated stores can be driven from
+        // genuinely separate processes in the test suite without ever touching
+        // the real ~/.claude-switch — and it lets an advanced caller point at a
+        // specific store. It changes nothing about the default.
+        if let Some(root) = std::env::var_os("CLAUDE_SWITCH_HOME")
+            && !root.is_empty()
+        {
+            return Self {
+                base_dir: PathBuf::from(root),
+            };
+        }
         let home = dirs::home_dir().expect("Cannot determine home directory");
         Self {
             base_dir: home.join(".claude-switch"),
@@ -118,23 +196,30 @@ impl AppConfig {
     }
 
     pub fn init(&self) -> io::Result<()> {
+        // create_dir_all also brings base_dir into being, which the lock file
+        // below needs. Idempotent, so racing inits do not conflict here.
         fs::create_dir_all(self.accounts_dir())?;
-        if !self.config_path().exists() {
-            fs::write(self.config_path(), "default=\n")?;
-        }
-        if !self.links_path().exists() {
-            fs::write(self.links_path(), "")?;
-        }
-        // Migration: repos → links
-        let old_repos = self.base_dir.join("repos");
-        if old_repos.exists()
-            && fs::read_to_string(self.links_path())
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
-        {
-            fs::rename(&old_repos, self.links_path())?;
-        }
-        Ok(())
+        // The config/links creation and the legacy `repos`→`links` migration are
+        // routing-state writes, so they run under the shared routing lock: two
+        // concurrent inits, or an init racing another cooperating writer, can
+        // never interleave the migration rename or double-create the baseline.
+        self.with_routing_lock(|| {
+            if !self.config_path().exists() {
+                write_file_atomic(&self.config_path(), "default=\n")?;
+            }
+            if !self.links_path().exists() {
+                write_file_atomic(&self.links_path(), "")?;
+            }
+            let old_repos = self.base_dir.join("repos");
+            if old_repos.exists()
+                && fs::read_to_string(self.links_path())
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true)
+            {
+                fs::rename(&old_repos, self.links_path())?;
+            }
+            Ok(())
+        })
     }
 
     pub fn account_path(&self, name: &str) -> PathBuf {
@@ -185,7 +270,7 @@ impl AppConfig {
             .iter()
             .map(|(k, v)| format!("{}={}\n", k, v))
             .collect();
-        fs::write(self.config_path(), content)
+        write_file_atomic(&self.config_path(), &content)
     }
 
     /// The value of `key`, or `None` when it is absent or empty. Empty is
@@ -199,8 +284,20 @@ impl AppConfig {
     }
 
     /// Set `key`, leaving every other setting in the file untouched. New keys
-    /// are appended; existing ones are updated in place.
+    /// are appended; existing ones are updated in place. Holds the routing lock
+    /// across the read-modify-write: `default=` lives in this file and is
+    /// routing-relevant, so a concurrent link change or another setting write
+    /// must not interleave.
     pub fn set_setting(&self, key: &str, value: &str) -> io::Result<()> {
+        self.with_routing_lock(|| self.set_setting_unlocked(key, value))
+    }
+
+    /// The lock-free core of [`set_setting`](Self::set_setting). The caller must
+    /// already hold the routing lock (see
+    /// [`with_routing_lock`](Self::with_routing_lock)); exposed so a multi-step
+    /// transaction — account removal clearing the default and dropping links —
+    /// can compose it without any method re-taking the lock and self-deadlocking.
+    pub(crate) fn set_setting_unlocked(&self, key: &str, value: &str) -> io::Result<()> {
         let mut settings = self.read_settings();
         match settings.iter_mut().find(|(k, _)| k == key) {
             Some(entry) => entry.1 = value.to_string(),
@@ -213,12 +310,55 @@ impl AppConfig {
         Ok(self.get_setting("default"))
     }
 
+    /// Like [`get_default`](Self::get_default), but a config file that exists yet
+    /// cannot be read or UTF-8-decoded is an error, not silently "no default".
+    ///
+    /// The human path's [`read_settings`] deliberately treats an unreadable
+    /// config as empty, and that stays unchanged. The machine mutation path,
+    /// however, fingerprints and reports the default as part of the route it
+    /// shows the user, so it must fail loudly (`CONFIG_STORE_UNREADABLE`) rather
+    /// than quietly turn a corrupt config into "no default" and skew the
+    /// before/after route and the state token. An absent file is still a clean
+    /// `Ok(None)` — that genuinely means no default is configured.
+    pub fn read_default_strict(&self) -> io::Result<Option<String>> {
+        let content = match fs::read_to_string(self.config_path()) {
+            Ok(content) => content,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(content
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .find(|(k, _)| *k == "default")
+            .map(|(_, v)| v.to_string())
+            .filter(|v| !v.is_empty()))
+    }
+
+    /// Unchecked set-default. Production uses the validating
+    /// [`set_default_checked`](Self::set_default_checked); retained for tests.
+    #[cfg(test)]
     pub fn set_default(&self, name: &str) -> io::Result<()> {
         self.set_setting("default", name)
     }
 
     pub fn clear_default(&self) -> io::Result<()> {
         self.set_setting("default", "")
+    }
+
+    /// Set the default account to `name`, but only if it still exists — the
+    /// existence check and the write happen under one routing lock, so the
+    /// `default` command's validation cannot go stale before the write (a
+    /// concurrent `remove` of `name` can no longer slip in between). Returns
+    /// `false`, writing nothing, when `name` is not a managed account.
+    pub fn set_default_checked(&self, name: &str) -> io::Result<bool> {
+        self.with_routing_lock(|| {
+            if !self.account_exists(name) {
+                return Ok(false);
+            }
+            self.set_setting_unlocked("default", name)?;
+            Ok(true)
+        })
     }
 
     // --- links file ---
@@ -273,42 +413,209 @@ impl AppConfig {
         }))
     }
 
+    /// The unconditional "set this link" operation. Production goes through the
+    /// validating [`link_checked`](Self::link_checked) or the lock-free
+    /// [`set_link_unlocked`](Self::set_link_unlocked); this unchecked, self-
+    /// locking form is retained for tests that deliberately link to accounts
+    /// that do not exist (stale-link and resolver fixtures).
+    #[cfg(test)]
     pub fn set_link(&self, dir: &str, account: &str) -> io::Result<()> {
+        self.with_routing_lock(|| self.set_link_unlocked(dir, account))
+    }
+
+    /// Lock-free core of [`set_link`](Self::set_link): replace every entry whose
+    /// stored path is equivalent to `dir` with the single `dir=account`. Caller
+    /// holds the routing lock.
+    pub(crate) fn set_link_unlocked(&self, dir: &str, account: &str) -> io::Result<()> {
         let mut links = self.all_links()?;
         links.retain(|(stored, _)| !crate::path_identity::equivalent(stored, dir));
         links.push((dir.to_string(), account.to_string()));
         self.write_links(&links)
     }
 
-    pub fn remove_link(&self, dir: &str) -> io::Result<bool> {
-        let mut links = self.all_links()?;
-        let before = links.len();
-        links.retain(|(stored, _)| !crate::path_identity::equivalent(stored, dir));
-        if links.len() == before {
-            return Ok(false);
-        }
-        self.write_links(&links)?;
-        Ok(true)
+    /// Link `dir` to `account`, but only if `account` still exists (or is the
+    /// standard `default`) — the existence check and the write run under one
+    /// routing lock, so the human `link` command's validation stays valid at
+    /// the write point even if a concurrent `remove` is in flight. Returns
+    /// `false`, writing nothing, when `account` is not a managed account.
+    pub fn link_checked(&self, dir: &str, account: &str) -> io::Result<bool> {
+        self.with_routing_lock(|| {
+            if account != "default" && !self.account_exists(account) {
+                return Ok(false);
+            }
+            self.set_link_unlocked(dir, account)?;
+            Ok(true)
+        })
     }
 
+    pub fn remove_link(&self, dir: &str) -> io::Result<bool> {
+        self.with_routing_lock(|| {
+            let mut links = self.all_links()?;
+            let before = links.len();
+            links.retain(|(stored, _)| !crate::path_identity::equivalent(stored, dir));
+            if links.len() == before {
+                return Ok(false);
+            }
+            self.write_links(&links)?;
+            Ok(true)
+        })
+    }
+
+    /// Self-locking form. Production composes
+    /// [`remove_links_for_account_unlocked`](Self::remove_links_for_account_unlocked)
+    /// inside the account-removal transaction; retained for tests.
+    #[cfg(test)]
     pub fn remove_links_for_account(&self, account: &str) -> io::Result<()> {
+        self.with_routing_lock(|| self.remove_links_for_account_unlocked(account))
+    }
+
+    /// Lock-free core of [`remove_links_for_account`](Self::remove_links_for_account):
+    /// drop every link naming `account`. Caller holds the routing lock — used by
+    /// the atomic account-removal transaction.
+    pub(crate) fn remove_links_for_account_unlocked(&self, account: &str) -> io::Result<()> {
         let mut links = self.all_links()?;
         links.retain(|(_, a)| a != account);
         self.write_links(&links)
     }
 
-    fn write_links(&self, links: &[(String, String)]) -> io::Result<()> {
+    /// The one stored entry (original spelling and account) whose path is
+    /// equivalent to `dir`, when `dir` has exactly one consistent exact link;
+    /// `None` when it has none. Reached only after ambiguity has been refused,
+    /// so a conflicting equivalence class cannot occur. Lets the machine path
+    /// report the actual stored spelling of a no-op and fold the equivalence
+    /// class into the expected-state token.
+    pub(crate) fn exact_equivalent_entry(
+        links: &[(String, String)],
+        dir: &str,
+    ) -> Option<(String, String)> {
+        links
+            .iter()
+            .find(|(stored, _)| crate::path_identity::equivalent(stored, dir))
+            .cloned()
+    }
+
+    /// *Every* stored entry whose path is equivalent to `dir`, in stored order
+    /// — the complete set the machine mutation's write will drop and replace
+    /// (its `retain(!equivalent)` removes all of them, not just the first).
+    /// `exact_equivalent_entry` returns only the first; binding just that into
+    /// the expected-state token would leave the rest of the affected set
+    /// unbound, so a live-filesystem change (a reparse/junction retarget) that
+    /// grows or shrinks the equivalence class — without altering any stored
+    /// string, the resolved route, or the first entry — could change which
+    /// entries the commit modifies while the token still matched. The token
+    /// folds in this whole ordered set so any such change refuses instead.
+    pub(crate) fn affected_equivalent_entries(
+        links: &[(String, String)],
+        dir: &str,
+    ) -> Vec<(String, String)> {
+        links
+            .iter()
+            .filter(|(stored, _)| crate::path_identity::equivalent(stored, dir))
+            .cloned()
+            .collect()
+    }
+
+    /// Serialize links into the store's `dir=account` line format. Pure, so a
+    /// test can pin the exact bytes without touching the filesystem.
+    pub(crate) fn serialize_links(links: &[(String, String)]) -> String {
         let content: String = links
             .iter()
             .map(|(d, a)| format!("{}={}", d, a))
             .collect::<Vec<_>>()
             .join("\n");
-        let content = if content.is_empty() {
+        if content.is_empty() {
             String::new()
         } else {
             content + "\n"
-        };
-        fs::write(self.links_path(), content)
+        }
+    }
+
+    /// Atomically persist `links`. **Does not take the routing lock** — the
+    /// caller must already hold it (see [`AppConfig::lock_routing_blocking`] /
+    /// [`AppConfig::try_lock_routing`]). Exposed to the machine mutation path so
+    /// it can write under the same single lock it read and verified under,
+    /// rather than re-locking and risking the store moving underneath it.
+    pub(crate) fn write_links(&self, links: &[(String, String)]) -> io::Result<()> {
+        write_file_atomic(&self.links_path(), &Self::serialize_links(links))
+    }
+
+    // --- routing-store lock ---
+    //
+    // One advisory lock serializes every writer of routing-relevant state —
+    // the links store AND the config file's `default=` — so a link change and
+    // a default change can never interleave their read-modify-write. It is an
+    // OS advisory lock on a dedicated lock file (`flock`/`LockFileEx` via
+    // `std::fs::File`), released automatically when the handle closes, so a
+    // crashed holder leaves nothing stale and nothing is ever deleted by age.
+    // It binds only cooperating writers in this binary: an older binary, a
+    // direct hand-edit, or any process that ignores the lock is NOT excluded —
+    // documented in docs/machine-api.md, never claimed otherwise.
+
+    pub fn routing_lock_path(&self) -> PathBuf {
+        self.base_dir.join(".routing.lock")
+    }
+
+    fn open_lock_file(&self) -> io::Result<File> {
+        // The base dir must exist (init creates it); the lock file's content is
+        // irrelevant, only the handle's advisory lock matters.
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.routing_lock_path())
+    }
+
+    /// Acquire the routing lock, waiting without a bound. Used by the human
+    /// link/unlink/default/account writers, whose contract is "succeeds unless
+    /// a real I/O error": the only holder they can meet is another cooperating
+    /// writer finishing a sub-second critical section. The returned handle is
+    /// the lock guard — the lock is released when it drops.
+    pub fn lock_routing_blocking(&self) -> io::Result<File> {
+        let f = self.open_lock_file()?;
+        f.lock()?;
+        Ok(f)
+    }
+
+    /// Run `f` while holding the routing lock (blocking acquisition), releasing
+    /// it when `f` returns. This is how a multi-step routing transaction — the
+    /// human `link`'s check-then-write, or account removal's clear-default,
+    /// drop-links and remove-directory — composes the lock-free `*_unlocked`
+    /// cores without any of them re-taking the lock. A nested acquisition would
+    /// self-deadlock: the OS advisory lock blocks a second lock of the same file
+    /// even from the same process (two separate handles on Unix, the same
+    /// mandatory range on Windows), so the cores must never lock on their own.
+    /// Do not perform owner prompts, interactive login or network calls inside
+    /// `f` — only bounded local routing-state work belongs under the lock.
+    pub fn with_routing_lock<T>(&self, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let _lock = self.lock_routing_blocking()?;
+        f()
+    }
+
+    /// Acquire the routing lock within [`ROUTING_LOCK_TRY_TIMEOUT`]. `Ok(None)`
+    /// means another writer holds it (the machine path maps this to
+    /// `LINKS_STORE_LOCKED`). The returned handle is the lock guard.
+    pub fn try_lock_routing(&self) -> io::Result<Option<File>> {
+        self.try_lock_routing_for(ROUTING_LOCK_TRY_TIMEOUT)
+    }
+
+    /// [`try_lock_routing`](Self::try_lock_routing) with an explicit bound, so a
+    /// test can exercise contention without waiting the production timeout.
+    pub(crate) fn try_lock_routing_for(&self, timeout: Duration) -> io::Result<Option<File>> {
+        let f = self.open_lock_file()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match f.try_lock() {
+                Ok(()) => return Ok(Some(f)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+            }
+        }
     }
 }
 
@@ -590,5 +897,259 @@ mod tests {
         assert!(!is_reserved_name("work"));
         assert!(!is_reserved_name("Default"));
         assert!(!is_reserved_name(""));
+    }
+
+    // --- atomic replacement ---
+
+    #[test]
+    fn write_file_atomic_replaces_content_and_leaves_no_temp_behind() {
+        let c = temp_config("atomic-replace");
+        let path = c.links_path();
+        write_file_atomic(&path, "first\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first\n");
+        write_file_atomic(&path, "second\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second\n");
+        // No .links.tmp.* sibling should survive a successful write.
+        let leftovers: Vec<_> = fs::read_dir(c.base_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file may be left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn a_concurrent_reader_only_ever_sees_a_complete_store_never_a_torn_one() {
+        // The whole point of the temp-file + rename: a reader opening the store
+        // mid-rewrite sees the complete old or complete new file, never a
+        // half-written one. A bare fs::write can be caught truncated here.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let c = Arc::new(temp_config("atomic-reader"));
+        let state_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".to_string();
+        let state_b = "b\n".to_string();
+        write_file_atomic(&c.links_path(), &state_a).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (c, stop, a, b) = (c.clone(), stop.clone(), state_a.clone(), state_b.clone());
+            std::thread::spawn(move || {
+                for i in 0..600 {
+                    let content = if i % 2 == 0 { &a } else { &b };
+                    write_file_atomic(&c.links_path(), content).unwrap();
+                }
+                stop.store(true, Ordering::Relaxed);
+            })
+        };
+        let path = c.links_path();
+        while !stop.load(Ordering::Relaxed) {
+            if let Ok(seen) = fs::read_to_string(&path) {
+                assert!(
+                    seen == state_a || seen == state_b,
+                    "reader saw a torn store: {seen:?}"
+                );
+            }
+        }
+        writer.join().unwrap();
+    }
+
+    // --- the routing lock ---
+
+    #[test]
+    fn the_routing_lock_is_exclusive_and_releases_on_drop() {
+        let c = temp_config("lock-exclusive");
+        let held = c.try_lock_routing().unwrap().expect("first acquirer wins");
+        // A second acquirer, via its own handle, must not get the lock while it
+        // is held — reported as busy within the (short) bound rather than hung.
+        assert!(
+            c.try_lock_routing_for(Duration::from_millis(80))
+                .unwrap()
+                .is_none(),
+            "a held lock must block a second acquirer"
+        );
+        drop(held);
+        assert!(
+            c.try_lock_routing().unwrap().is_some(),
+            "the lock must be available again once the guard drops"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_never_lose_each_others_links() {
+        // Each thread links a different directory. Without the shared lock the
+        // read-modify-write would race and one link would be lost; with it,
+        // every thread's link survives.
+        use std::sync::Arc;
+        let c = Arc::new(temp_config("concurrent-writers"));
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let c = c.clone();
+            handles.push(std::thread::spawn(move || {
+                c.set_link(&format!("/dir/{i}"), "work").unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut links = c.all_links().unwrap();
+        links.sort();
+        let mut expected: Vec<_> = (0..8)
+            .map(|i| (format!("/dir/{i}"), "work".to_string()))
+            .collect();
+        expected.sort();
+        assert_eq!(links, expected, "no writer's link may be lost");
+    }
+
+    #[test]
+    fn a_blocking_human_writer_waits_for_a_held_lock_then_succeeds() {
+        use std::sync::Arc;
+        let c = Arc::new(temp_config("blocking-writer"));
+        let held = c.try_lock_routing().unwrap().expect("acquire");
+        let writer = {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                // Blocks until the lock below is released, then writes.
+                c.set_link("/late", "work").unwrap();
+            })
+        };
+        // Give the writer time to be genuinely blocked, then release.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            c.all_links().unwrap().is_empty(),
+            "the writer must not have written yet"
+        );
+        drop(held);
+        writer.join().unwrap();
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![("/late".to_string(), "work".to_string())]
+        );
+    }
+
+    // --- checked writers (validation and write under one lock) ---
+
+    #[test]
+    fn link_checked_writes_for_an_existing_account_and_refuses_a_missing_one() {
+        let c = temp_config("link-checked");
+        fs::create_dir_all(c.account_path("work")).unwrap();
+        assert!(
+            c.link_checked("/p", "work").unwrap(),
+            "an existing account links"
+        );
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![("/p".to_string(), "work".to_string())]
+        );
+        assert!(
+            !c.link_checked("/q", "ghost").unwrap(),
+            "a missing account is refused"
+        );
+        assert_eq!(
+            c.all_links().unwrap(),
+            vec![("/p".to_string(), "work".to_string())],
+            "nothing is written for a missing account"
+        );
+        assert!(
+            c.link_checked("/r", "default").unwrap(),
+            "the standard account is always allowed"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn set_default_checked_sets_an_existing_account_and_refuses_a_missing_one() {
+        let c = temp_config("default-checked");
+        fs::create_dir_all(c.account_path("work")).unwrap();
+        assert!(c.set_default_checked("work").unwrap());
+        assert_eq!(c.get_default().unwrap().as_deref(), Some("work"));
+        assert!(!c.set_default_checked("ghost").unwrap());
+        assert_eq!(
+            c.get_default().unwrap().as_deref(),
+            Some("work"),
+            "left unchanged"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    // --- atomic-write ownership (F4) ---
+
+    #[test]
+    fn write_file_atomic_preserves_the_original_and_cleans_its_own_temp_when_the_replace_fails() {
+        let c = temp_config("atomic-replace-fail");
+        // A directory where the store file should go: fs::rename(file, dir) fails
+        // on both platforms, so the replace fails AFTER the temp is created —
+        // exercising the cleanup-of-our-own-temp path.
+        let path = c.base_dir.join("a-dir-not-a-file");
+        fs::create_dir_all(&path).unwrap();
+        let result = write_file_atomic(&path, "content\n");
+        assert!(
+            result.is_err(),
+            "replacing a directory with a file must fail"
+        );
+        assert!(path.is_dir(), "the original must be untouched");
+        let leftovers: Vec<_> = fs::read_dir(&c.base_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "our own temp must be cleaned up: {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn write_file_atomic_leaves_an_unrelated_temp_file_untouched() {
+        // Cleanup is scoped to this operation's own temp — never a foreign
+        // `.tmp` that another writer (or a crashed earlier one) may own.
+        let c = temp_config("atomic-foreign-temp");
+        let foreign = c.base_dir.join(".links.tmp.someone-else");
+        fs::write(&foreign, "not ours").unwrap();
+        write_file_atomic(&c.links_path(), "ours\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&foreign).unwrap(),
+            "not ours",
+            "a foreign temp must never be removed"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn an_actual_temp_name_collision_fails_and_preserves_both_the_temp_and_the_store() {
+        // The real `create_new` collision path: a file already occupies the
+        // EXACT temp name the write will choose. The write must fail on the
+        // exclusive create and, because it did not create that file, leave it
+        // AND the pre-existing store completely untouched — never remove a temp
+        // it does not own. The earlier foreign-temp test uses a non-colliding
+        // name and so only proves cleanup scoping on success; this forces the
+        // collision itself.
+        let c = temp_config("atomic-temp-collision");
+        write_file_atomic(&c.links_path(), "original\n").unwrap();
+
+        // Occupy the precise temp name the seq-N write will choose.
+        let seq = 987_654_321_u64;
+        let tmp = c
+            .base_dir
+            .join(format!(".links.tmp.{}.{seq}", std::process::id()));
+        fs::write(&tmp, "a pre-existing temp that happens to collide").unwrap();
+
+        let err = write_file_atomic_seq(&c.links_path(), "replacement\n", seq)
+            .expect_err("an exclusive create onto an existing temp name must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&tmp).unwrap(),
+            "a pre-existing temp that happens to collide",
+            "a colliding temp this write did not create must be preserved"
+        );
+        assert_eq!(
+            fs::read_to_string(c.links_path()).unwrap(),
+            "original\n",
+            "the store must be left intact when the temp create fails"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
     }
 }
