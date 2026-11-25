@@ -29,6 +29,15 @@ static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// may, on some platforms, lose the just-committed file and keep the old one —
 /// an old-or-new outcome, still never a torn one.
 fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
+    let seq = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    write_file_atomic_seq(path, content, seq)
+}
+
+/// The body of [`write_file_atomic`] with the temp-name sequence injected, so a
+/// test can occupy the exact temp name a write will choose and exercise the
+/// real `create_new` collision path. Production always calls it through
+/// [`write_file_atomic`] with the monotonic counter.
+fn write_file_atomic_seq(path: &Path, content: &str, seq: u64) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -38,7 +47,6 @@ fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
     let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "store path has no file name")
     })?;
-    let seq = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
 
     // Exclusive create. A failure here — including a pre-existing temp of the
@@ -484,6 +492,27 @@ impl AppConfig {
             .iter()
             .find(|(stored, _)| crate::path_identity::equivalent(stored, dir))
             .cloned()
+    }
+
+    /// *Every* stored entry whose path is equivalent to `dir`, in stored order
+    /// — the complete set the machine mutation's write will drop and replace
+    /// (its `retain(!equivalent)` removes all of them, not just the first).
+    /// `exact_equivalent_entry` returns only the first; binding just that into
+    /// the expected-state token would leave the rest of the affected set
+    /// unbound, so a live-filesystem change (a reparse/junction retarget) that
+    /// grows or shrinks the equivalence class — without altering any stored
+    /// string, the resolved route, or the first entry — could change which
+    /// entries the commit modifies while the token still matched. The token
+    /// folds in this whole ordered set so any such change refuses instead.
+    pub(crate) fn affected_equivalent_entries(
+        links: &[(String, String)],
+        dir: &str,
+    ) -> Vec<(String, String)> {
+        links
+            .iter()
+            .filter(|(stored, _)| crate::path_identity::equivalent(stored, dir))
+            .cloned()
+            .collect()
     }
 
     /// Serialize links into the store's `dir=account` line format. Pure, so a
@@ -1085,6 +1114,41 @@ mod tests {
             fs::read_to_string(&foreign).unwrap(),
             "not ours",
             "a foreign temp must never be removed"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn an_actual_temp_name_collision_fails_and_preserves_both_the_temp_and_the_store() {
+        // The real `create_new` collision path: a file already occupies the
+        // EXACT temp name the write will choose. The write must fail on the
+        // exclusive create and, because it did not create that file, leave it
+        // AND the pre-existing store completely untouched — never remove a temp
+        // it does not own. The earlier foreign-temp test uses a non-colliding
+        // name and so only proves cleanup scoping on success; this forces the
+        // collision itself.
+        let c = temp_config("atomic-temp-collision");
+        write_file_atomic(&c.links_path(), "original\n").unwrap();
+
+        // Occupy the precise temp name the seq-N write will choose.
+        let seq = 987_654_321_u64;
+        let tmp = c
+            .base_dir
+            .join(format!(".links.tmp.{}.{seq}", std::process::id()));
+        fs::write(&tmp, "a pre-existing temp that happens to collide").unwrap();
+
+        let err = write_file_atomic_seq(&c.links_path(), "replacement\n", seq)
+            .expect_err("an exclusive create onto an existing temp name must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&tmp).unwrap(),
+            "a pre-existing temp that happens to collide",
+            "a colliding temp this write did not create must be preserved"
+        );
+        assert_eq!(
+            fs::read_to_string(c.links_path()).unwrap(),
+            "original\n",
+            "the store must be left intact when the temp create fails"
         );
         let _ = fs::remove_dir_all(&c.base_dir);
     }

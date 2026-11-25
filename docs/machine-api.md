@@ -335,16 +335,27 @@ $ claude-acc link --json --path /Users/alice/work/project-a --account work --dry
   claim that anything was written.
 - `expected_state` is a 64-hex-character fingerprint of every routing-relevant
   input — the directory, the account, the whole links store, the configured
-  default, and the account inventory. It is a conservative **state fingerprint,
-  not authentication and not a transaction id**: an identical restored state
+  default, the account inventory, **and the resolved routing interpretation
+  itself**: the before-route claude-acc resolves for `<DIR>`, the complete
+  ordered set of `<DIR>`'s own exact-equivalent stored entries (every entry a
+  commit would drop and replace, not merely the first), and `<DIR>`'s own
+  resolved filesystem identity. It is a conservative **state fingerprint, not
+  authentication and not a transaction id**: an identical restored state
   produces an identical token, so it cannot tell "never changed" from "changed
   and changed back" (an ABA change). It refuses on **any** routing-store change,
   including ones unrelated to this directory. It carries no secret — only
-  directory strings, account names and the stored map. It fingerprints those
-  stored strings and the inventory, not live filesystem state: a symlink or
-  junction retarget of the directory between preview and commit is not reflected
-  in it. The post-write re-verification — not the token — is what guarantees
-  `<DIR>` ends up resolving to `<ACCOUNT>` by its own exact link.
+  directory strings, account names and the stored map.
+- Because the resolved route, the exact-equivalence set and the directory
+  identity all come from claude-acc's resolver and `path_identity` — which
+  consult live filesystem identity (`canonicalize`) on platforms that have it —
+  a symlink or junction retarget that changes how `<DIR>` is interpreted, or
+  which stored entries fall in its equivalence class, flips the token and is
+  refused at the expected-state comparison, even when no stored string moved.
+  What the token still cannot cover is the narrow window **after** that
+  comparison and **before** the atomic write (see "Atomicity, locking, and who
+  is bound"); there the post-write re-verification — not the token — is the
+  final guard that `<DIR>` ends up resolving to `<ACCOUNT>` by its own exact
+  link.
 - `would_change` is `false` when `<DIR>` already has an exact link to
   `<ACCOUNT>`. An *inherited* route that already resolves to `<ACCOUNT>` is
   **not** a no-op: there is no exact link yet, so committing would still write
@@ -372,10 +383,26 @@ $ claude-acc link --json --path /Users/alice/work/project-a --account work \
 - A commit that finds the exact link already present is a **no-op success**:
   `changed: false`, the store is not rewritten, and `before`/`after` are equal.
 
-### What refuses, and how
+### Outcomes, and what each means for the store
 
-Every refusal writes nothing and is an operational-failure envelope (`ok: false`,
-exit 1). Branch on `error.code`:
+A `link --json` commit ends in exactly one of four states, and the distinction
+matters because they do not all leave the store in the same place:
+
+- **A definite pre-commit refusal** — every `error.code` listed below *except*
+  `POSTCONDITION_FAILED`. The refusal is decided before any write, so the store
+  is byte-for-byte unchanged. These are the cases that write nothing.
+- **A successful no-op** (`ok: true`, `changed: false`) — the exact link was
+  already present; the store is not rewritten and `before`/`after` are equal.
+- **A successful committed mutation** (`ok: true`, `changed: true`) — the exact
+  link was written and re-verified; `after` is the route re-read from the store.
+- **An uncertain post-commit outcome** (`POSTCONDITION_FAILED`) — the write was
+  attempted and the store **may have changed**, but routing did not re-verify as
+  expected. This is a refusal envelope too, but unlike the others it is **not** a
+  guarantee that nothing was written; it is never reported as "unchanged" and is
+  never auto-rolled-back.
+
+Every refusal is an operational-failure envelope (`ok: false`, exit 1). Branch
+on `error.code`, never on `message`:
 
 - `STATE_CHANGED` — the `--expect-state` token no longer matches; the state the
   user confirmed has moved. `details` carries the current `before` route.
@@ -391,6 +418,11 @@ exit 1). Branch on `error.code`:
   would trim). The store is never corrupted by a path it cannot represent.
 - `LINKS_STORE_INVALID` / `LINKS_STORE_UNREADABLE` — the store is malformed or
   unreadable; a malformed store is refused, never rewritten by this path.
+- `CONFIG_STORE_UNREADABLE` — the config file (which holds `default=`) or the
+  account inventory exists but could not be read or decoded. Unlike the human
+  path, which treats an unreadable config as "no default", the machine path
+  fingerprints and reports the default as part of the route, so it refuses
+  loudly rather than committing against a skewed before/after route and token.
 - `NOT_INITIALIZED` — claude-acc has no routing store yet. This verb never
   creates one (so a dry-run has no side effect); initialize it by running any
   other claude-acc command first.
@@ -435,8 +467,10 @@ exit 1). Branch on `error.code`:
     closed.
   - A directory's filesystem identity changing outside the lock (a
     reparse/junction retarget) is likewise not serialized; the token binds the
-    resolved route and exact-equivalence class to catch it at comparison time,
-    but not within that final window.
+    resolved route, the complete exact-equivalence set and the directory's own
+    resolved identity to catch it at comparison time — including a retarget that
+    grows or shrinks which stored entries fall in `<DIR>`'s equivalence class
+    without changing any stored string — but not within that final window.
   - Because the token is a state *fingerprint*, an ABA change — a value changed
     and then restored identically — is indistinguishable from no change.
   - **Operational prerequisite:** a consumer must not drive this verb against a

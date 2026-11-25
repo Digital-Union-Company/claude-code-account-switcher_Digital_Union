@@ -39,9 +39,11 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
 
 /// Fingerprint of every routing-relevant input the preview was computed
 /// against: the requested directory and account, the full links store, the
-/// configured default, and the account inventory. Returned opaquely as
-/// `expected_state` by `--dry-run` and replayed by `--expect-state` so the
-/// commit proceeds only if nothing routing-relevant moved in between.
+/// configured default, the account inventory, the resolved before-route, the
+/// complete set of `dir`'s own exact-equivalent entries, and `dir`'s own
+/// filesystem identity. Returned opaquely as `expected_state` by `--dry-run`
+/// and replayed by `--expect-state` so the commit proceeds only if nothing
+/// routing-relevant moved in between.
 ///
 /// It is a conservative whole-store STATE FINGERPRINT, deliberately not
 /// authentication and not a transaction id: an identical restored state yields
@@ -50,6 +52,7 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
 /// ones unrelated to this directory — the safe direction. It carries no
 /// credential or credential-derived value: its inputs are directory strings,
 /// account names and the stored map, none of which are secrets.
+#[allow(clippy::too_many_arguments)]
 fn state_token(
     dir: &str,
     account: &str,
@@ -57,10 +60,11 @@ fn state_token(
     default: Option<&str>,
     accounts: &[String],
     before: &EffectiveRoute,
-    exact_entry: Option<&(String, String)>,
+    affected: &[(String, String)],
+    dir_identity: Option<&str>,
 ) -> String {
     let mut h = Sha256::new();
-    h.update(b"claude-acc-link-state-v2\0");
+    h.update(b"claude-acc-link-state-v3\0");
     h.update(dir.as_bytes());
     h.update([0]);
     h.update(account.as_bytes());
@@ -81,12 +85,16 @@ fn state_token(
         h.update([0]);
     }
     // The actual routing INTERPRETATION, not only the textual store: `before`
-    // is claude-acc's resolved effective route, and `exact_entry` is dir's own
-    // exact-equivalence class as the resolver sees it now. Both come from the
-    // resolver and `path_identity`, which can consult live filesystem identity
-    // (`canonicalize`), so a reparse/symlink retarget that changes how dir is
-    // interpreted — without changing any stored string — still flips the token
-    // and refuses the commit, rather than acting on a stale interpretation.
+    // is claude-acc's resolved effective route, `affected` is the COMPLETE
+    // ordered set of dir's exact-equivalence entries the write will drop and
+    // replace (not merely the first), and `dir_identity` is dir's own resolved
+    // filesystem identity. All come from the resolver and `path_identity`,
+    // which can consult live filesystem identity (`canonicalize`), so a
+    // reparse/junction retarget that changes how dir is interpreted — or which
+    // stored entries fall in its equivalence class — without changing any
+    // stored string still flips the token and refuses the commit, rather than
+    // acting on a stale interpretation or modifying a different set of entries
+    // than the one previewed.
     h.update(b"before\0");
     h.update(before.resolved_account.as_bytes());
     h.update([0]);
@@ -94,15 +102,18 @@ fn state_token(
     h.update([0]);
     h.update(before.owning_link_path.as_deref().unwrap_or("").as_bytes());
     h.update([0]);
-    h.update(b"exact\0");
-    match exact_entry {
-        Some((stored, acc)) => {
-            h.update(stored.as_bytes());
-            h.update(b"=");
-            h.update(acc.as_bytes());
-        }
-        None => h.update(b"<none>"),
+    // Length-prefixed so the set boundary cannot be forged by run-together
+    // entries, then every member in stored order.
+    h.update(b"affected\0");
+    h.update((affected.len() as u64).to_le_bytes());
+    for (stored, acc) in affected {
+        h.update(stored.as_bytes());
+        h.update(b"=");
+        h.update(acc.as_bytes());
+        h.update([0]);
     }
+    h.update(b"dir-identity\0");
+    h.update(dir_identity.unwrap_or("<none>").as_bytes());
     h.update([0]);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -282,7 +293,18 @@ pub fn run_json(
         }
     };
 
+    // `exact_entry` is `dir`'s first equivalent stored entry — the one whose
+    // stored spelling a no-op reports — and `affected` is the COMPLETE
+    // equivalence class in stored order, exactly the set the write below drops
+    // and replaces. Binding the whole set into the token (not just the first
+    // entry) is what lets it refuse when a live-FS change alters *which* entries
+    // the commit would modify.
     let exact_entry = AppConfig::exact_equivalent_entry(&links, dir);
+    let affected = AppConfig::affected_equivalent_entries(&links, dir);
+    // dir's own resolved filesystem identity, folded in so a retarget of dir
+    // itself flips the token (see `state_token`); `None` where the platform's
+    // path model establishes no separate local identity.
+    let dir_identity = crate::path_identity::identity_fingerprint(dir);
     let already_exact = exact_entry.as_ref().map(|(_, a)| a.as_str()) == Some(account);
     let current_token = state_token(
         dir,
@@ -291,7 +313,8 @@ pub fn run_json(
         default.as_deref(),
         &accounts,
         &before,
-        exact_entry.as_ref(),
+        &affected,
+        dir_identity.as_deref(),
     );
 
     // The path reported as the stored link: for a no-op it is the entry's own
@@ -454,7 +477,8 @@ mod tests {
         let default = config.get_default().unwrap();
         let accounts = config.list_accounts().unwrap();
         let before = resolve::effective_route(config, std::path::Path::new(dir)).unwrap();
-        let exact = AppConfig::exact_equivalent_entry(&links, dir);
+        let affected = AppConfig::affected_equivalent_entries(&links, dir);
+        let dir_identity = crate::path_identity::identity_fingerprint(dir);
         state_token(
             dir,
             account,
@@ -462,7 +486,8 @@ mod tests {
             default.as_deref(),
             &accounts,
             &before,
-            exact.as_ref(),
+            &affected,
+            dir_identity.as_deref(),
         )
     }
 
@@ -481,7 +506,7 @@ mod tests {
         let before = standard_route();
         let links = vec![("/p".to_string(), "work".to_string())];
         let accts = vec!["work".to_string()];
-        let exact = Some(("/p".to_string(), "work".to_string()));
+        let affected = vec![("/p".to_string(), "work".to_string())];
         let base = state_token(
             "/p",
             "work",
@@ -489,7 +514,8 @@ mod tests {
             Some("work"),
             &accts,
             &before,
-            exact.as_ref(),
+            &affected,
+            Some("id:/p"),
         );
         assert_eq!(
             base,
@@ -500,7 +526,8 @@ mod tests {
                 Some("work"),
                 &accts,
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             ),
             "same inputs must hash the same"
         );
@@ -515,7 +542,8 @@ mod tests {
                 Some("work"),
                 &accts,
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             )
         );
         assert_ne!(
@@ -527,7 +555,8 @@ mod tests {
                 Some("work"),
                 &accts,
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             )
         );
         assert_ne!(
@@ -539,7 +568,8 @@ mod tests {
                 Some("work"),
                 &accts,
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             )
         );
         assert_ne!(
@@ -551,12 +581,22 @@ mod tests {
                 Some("home"),
                 &accts,
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             )
         );
         assert_ne!(
             base,
-            state_token("/p", "work", &links, None, &accts, &before, exact.as_ref())
+            state_token(
+                "/p",
+                "work",
+                &links,
+                None,
+                &accts,
+                &before,
+                &affected,
+                Some("id:/p")
+            )
         );
         assert_ne!(
             base,
@@ -567,11 +607,13 @@ mod tests {
                 Some("work"),
                 &["work".to_string(), "home".to_string()],
                 &before,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
             )
         );
         // And the bound routing INTERPRETATION flips it too: a different resolved
-        // before-route, or a different exact-equivalence entry.
+        // before-route, a different affected equivalence set, or a different
+        // resolved directory identity.
         let other_route = EffectiveRoute {
             resolved_account: "work".to_string(),
             source: RouteSource::Linked,
@@ -586,12 +628,69 @@ mod tests {
                 Some("work"),
                 &accts,
                 &other_route,
-                exact.as_ref()
+                &affected,
+                Some("id:/p")
+            )
+        );
+        // An empty affected set, and a larger affected set whose FIRST member is
+        // identical, both flip the token — the whole set is bound, not the head.
+        assert_ne!(
+            base,
+            state_token(
+                "/p",
+                "work",
+                &links,
+                Some("work"),
+                &accts,
+                &before,
+                &[],
+                Some("id:/p")
             )
         );
         assert_ne!(
             base,
-            state_token("/p", "work", &links, Some("work"), &accts, &before, None)
+            state_token(
+                "/p",
+                "work",
+                &links,
+                Some("work"),
+                &accts,
+                &before,
+                &[
+                    ("/p".to_string(), "work".to_string()),
+                    ("/P".to_string(), "work".to_string()),
+                ],
+                Some("id:/p")
+            ),
+            "a changed affected set with the same first entry must flip the token"
+        );
+        // And the bound directory identity flips it: present vs absent, and two
+        // different resolved identities.
+        assert_ne!(
+            base,
+            state_token(
+                "/p",
+                "work",
+                &links,
+                Some("work"),
+                &accts,
+                &before,
+                &affected,
+                None
+            )
+        );
+        assert_ne!(
+            base,
+            state_token(
+                "/p",
+                "work",
+                &links,
+                Some("work"),
+                &accts,
+                &before,
+                &affected,
+                Some("id:/other")
+            )
         );
     }
 
@@ -599,8 +698,8 @@ mod tests {
     fn state_token_separators_prevent_field_run_together_collisions() {
         // "a"+"b" must not hash the same as "ab"+"" for any field pair.
         let r = standard_route();
-        let a = state_token("a", "b", &[], None, &[], &r, None);
-        let b = state_token("ab", "", &[], None, &[], &r, None);
+        let a = state_token("a", "b", &[], None, &[], &r, &[], None);
+        let b = state_token("ab", "", &[], None, &[], &r, &[], None);
         assert_ne!(a, b);
     }
 
@@ -951,6 +1050,99 @@ mod tests {
             0
         );
         assert_eq!(config.all_links().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    fn make_junction(link: &std::path::Path, target: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()
+            .expect("spawn mklink");
+        assert!(status.success(), "mklink /J must create the junction");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_changed_affected_set_with_an_unchanged_first_entry_and_route_is_a_state_change() {
+        // The precise gap the v3 token closes: `exact_equivalent_entry` returns
+        // only the FIRST equivalent entry, while the write drops EVERY equivalent
+        // one. A junction retarget can pull a second stored entry into `<DIR>`'s
+        // equivalence class with NO stored string, resolved route or first entry
+        // changing — so a token bound to only the first entry would still match
+        // and the commit would silently modify an entry the owner never previewed.
+        // Binding the complete affected set refuses it instead.
+        let (root, config) = scratch("affected-set-grows");
+        account(&config, "work");
+        let proj = root.join("proj");
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&proj).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        let proj_s = proj.to_str().unwrap().to_string();
+        let alias = root.join("alias");
+        // alias -> elsewhere: NOT equivalent to proj yet.
+        make_junction(&alias, &elsewhere);
+        let alias_s = alias.to_str().unwrap().to_string();
+
+        // Two stored entries, both naming `work`, so the class is never
+        // ambiguous. Only `proj` is equivalent to proj right now.
+        fs::write(
+            config.links_path(),
+            format!("{proj_s}=work\n{alias_s}=work\n"),
+        )
+        .unwrap();
+
+        // Baseline interpretation the owner previews against.
+        let links = config.all_links().unwrap();
+        let first_before = AppConfig::exact_equivalent_entry(&links, &proj_s);
+        let route_before = resolve::effective_route(&config, &proj).unwrap();
+        let affected_before = AppConfig::affected_equivalent_entries(&links, &proj_s);
+        assert_eq!(affected_before.len(), 1, "only proj is equivalent yet");
+        let token = token_now(&config, &proj_s, "work");
+
+        // Retarget the junction so alias now resolves to proj. No stored string
+        // changes; the links file is byte-for-byte identical.
+        fs::remove_dir(&alias).unwrap();
+        make_junction(&alias, &proj);
+
+        // The first equivalent entry, the resolved route, and proj's own
+        // identity are all UNCHANGED — the only thing that moved is the full set.
+        let links_after = config.all_links().unwrap();
+        assert_eq!(
+            AppConfig::exact_equivalent_entry(&links_after, &proj_s),
+            first_before,
+            "the first equivalent entry must be unchanged"
+        );
+        assert_eq!(
+            resolve::effective_route(&config, &proj).unwrap(),
+            route_before,
+            "the resolved before-route must be unchanged"
+        );
+        assert_eq!(
+            AppConfig::affected_equivalent_entries(&links_after, &proj_s).len(),
+            2,
+            "but the complete affected set has grown to include the alias"
+        );
+
+        // Committing with the pre-retarget token is refused: STATE_CHANGED.
+        let before_bytes = fs::read(config.links_path()).unwrap();
+        assert_eq!(
+            run_json(&config, Some(&proj_s), Some("work"), false, Some(&token)),
+            1,
+            "a grown affected set must refuse the stale token"
+        );
+        assert_eq!(
+            fs::read(config.links_path()).unwrap(),
+            before_bytes,
+            "a refused commit must not rewrite the store"
+        );
+        let _ = fs::remove_dir(&alias);
         let _ = fs::remove_dir_all(root);
     }
 }

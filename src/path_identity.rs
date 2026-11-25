@@ -17,6 +17,41 @@ pub fn equivalent(left: &str, right: &str) -> bool {
     }
 }
 
+/// The directory's stable filesystem identity, when the platform's path model
+/// can establish one *locally*. Used by the machine mutation to bind `<DIR>`'s
+/// own identity into the expected-state token, so a reparse/junction retarget
+/// of the directory itself between preview and commit flips the token even when
+/// no stored string, resolved route or equivalence-set membership visibly
+/// moved.
+///
+/// Only meaningful where the model already consults live identity: on Windows,
+/// for an absolute, locally-canonicalizable spelling, it is the canonical
+/// (reparse-resolved) lexical key — the exact same key `equivalent` compares
+/// after canonicalization, so the two can never disagree about what "the same
+/// directory" means. Everywhere else it is `None`: non-Windows equivalence is
+/// pure exact-string (the `dir` string is already bound verbatim and there is
+/// no separate identity to add), and a drive-relative/UNC/non-canonicalizable
+/// Windows spelling has no local identity to resolve. `None` is not a weaker
+/// guard — the affected-set and resolved-route bindings still catch a move
+/// there; it only means there is no *additional* identity to fold in.
+pub fn identity_fingerprint(dir: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let key = windows_lexical_key(dir);
+        if key.absolute && key.locally_canonicalizable {
+            let canonical = std::fs::canonicalize(dir).ok()?;
+            return Some(windows_lexical_key(canonical.to_string_lossy().as_ref()).value);
+        }
+        None
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsPathKey {
