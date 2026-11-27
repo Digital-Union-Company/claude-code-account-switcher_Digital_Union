@@ -445,7 +445,10 @@ pub fn perform_action(
 
     // Pin only when the login completed with an identity to record, and only if
     // the account has no pin yet (`write_after_login` never moves an existing
-    // pin — that swap is exactly the drift the pin exists to report).
+    // pin — that swap is exactly the drift the pin exists to report). The pin is
+    // written from the LOCAL `.claude.json` identity (what `write_after_login`
+    // reads), not the audited `identity` — the two agree right after a real
+    // login, and the pin is a record of Claude Code's own local account state.
     let mut pinned = false;
     if matches!(outcome, Outcome::Authenticated | Outcome::LoginCompleted) {
         super::lock::write_after_login(config, name);
@@ -1459,6 +1462,55 @@ mod tests {
         assert_eq!(report.outcome, Outcome::LoginCompleted);
 
         drop(human);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn the_lifecycle_lock_is_released_after_an_in_lock_refusal() {
+        // AccountNotFound is returned from INSIDE the lifecycle lock; the lock
+        // must still release (RAII on the guard), so a later action for the same
+        // name is not wrongly reported ACTION_IN_PROGRESS. This is the safe
+        // acquire -> drop -> reacquire pattern (no interleaved failed try).
+        let c = scratch("lock-release");
+        let refused = perform_action(&c, Action::Reauth, "later", false, &|_: &Path| {
+            LoginExit::Exited(0)
+        });
+        assert_eq!(
+            refused.unwrap_err(),
+            ActionError::AccountNotFound("later".to_string())
+        );
+        let login = fake_login_success("u-later", None);
+        let report = perform_action(&c, Action::Create, "later", false, &login).unwrap();
+        assert_eq!(report.outcome, Outcome::LoginCompleted);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn the_routing_lock_is_free_while_the_login_runs() {
+        // Safety property F3: the GLOBAL routing lock must NOT be held across the
+        // interactive login (only across the brief name reservation on create).
+        // Without this test, a refactor moving the login inside with_routing_lock
+        // would pass everything else. The probe takes the routing lock on a
+        // separate handle while nobody holds it, so it is robust cross-platform.
+        let c = scratch("routing-free");
+        let base = c.base_dir.clone();
+        let login = move |acc_dir: &Path| {
+            let probe = AppConfig {
+                base_dir: base.clone(),
+            };
+            assert!(
+                probe.try_lock_routing().unwrap().is_some(),
+                "the routing lock must be free while the login is hosted"
+            );
+            fs::write(
+                acc_dir.join(".claude.json"),
+                json!({"oauthAccount": {"accountUuid": "u-rf"}}).to_string(),
+            )
+            .unwrap();
+            LoginExit::Exited(0)
+        };
+        let report = perform_action(&c, Action::Create, "rf", false, &login).unwrap();
+        assert_eq!(report.outcome, Outcome::LoginCompleted);
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
