@@ -480,6 +480,138 @@ on `error.code`, never on `message`:
     writers it is the caller's responsibility, and the guarantee degrades to the
     layered best-effort above.
 
+## `claude-acc account-action --json`
+
+The machine contract for a GUI to **create** a new managed account or
+**reauthenticate** an existing one, so a user never has to hand-type
+`claude-acc add` / `claude-acc login` in a terminal. It is machine-only: humans
+use `add`/`login`. `claude-acc` stays the sole owner of identity, credentials
+and the authentication interaction throughout.
+
+### Why this verb is shaped differently from the read-only `--json` commands
+
+The supported Claude Code login (`claude auth login`) is **strictly
+interactive**: its only options are `--claudeai/--console/--email/--sso`; there
+is no `--json`, no headless/device-code mode, and no secret-safe redirected code
+entry. A GUI therefore cannot observe or feed the OAuth code, and per-keystroke
+progress is simply not available upstream. The honest design that follows:
+
+- **The caller hosts the terminal.** The consumer launches
+  `claude-acc account-action` in a terminal it owns; the interactive
+  `claude auth login` inherits that terminal, exactly as human `add`/`login` do.
+  The OAuth code is entered there, in claude-acc's own authentication surface —
+  the GUI never sees it.
+- **The machine channel is a file, not stdout.** Because the terminal is busy
+  hosting the login, the single structured outcome document is written to the
+  caller-supplied `--result-file`, never mixed into the login's stdout. It
+  carries only non-secret fields (account name, the coarse outcome, the
+  reconciled **public** identity email/uuid) — never a code, token, credential,
+  cookie or authorization header.
+- **Discovery without authenticating.** `--probe` reports the contract version
+  and exactly which capabilities exist (and which do not), performing no
+  authentication and touching nothing.
+
+The outcome is **coarse by necessity**: `authenticated`, `not_authenticated`
+(the login exited non-zero — upstream does not let claude-acc tell a user
+*cancellation* apart from a *failure*), `uncertain` (exited success yet no local
+identity landed), or `spawn_failed`. This limitation is reported in the probe
+output rather than papered over. The `contract_version` is independent of the
+envelope `schema_version`: it is the number a consumer pins to decide whether
+this create/reauth contract is present, and it starts at `1`.
+
+### Capability discovery — `--probe`
+
+`claude-acc account-action --json --probe` performs no authentication and emits
+the capability document on **stdout** (the one case where stdout is used, since
+no login is hosted):
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "contract": "account-action",
+  "contract_version": 1,
+  "provider_version": "0.23.0",
+  "actions": ["create", "reauth"],
+  "interactive_hosting": "caller_terminal",
+  "result_channel": "result_file",
+  "oauth_code_entry_feedback": "unavailable",
+  "progress_granularity": "final_outcome_only",
+  "distinguishes_cancellation_from_failure": false,
+  "secret_safe": true
+}
+```
+
+### Running an action — `--action create|reauth --account <name> --result-file <path> [--seed]`
+
+`--json` is required (it selects this machine contract). `--action`, `--account`
+and `--result-file` are required unless `--probe` is given. `create` reserves a
+new managed account directory, then hosts the login; `reauth` requires the
+managed account to already exist. `--seed` (create only) seeds the new directory
+from `~/.claude/`, exactly like `add --seed`.
+
+The single outcome document is written to `--result-file` as the same envelope
+shape every `--json` command uses. A **success** (`ok:true`) means the action
+ran to a defined conclusion — *not* that authentication necessarily succeeded;
+read the `outcome` field for that:
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "contract": "account-action",
+  "contract_version": 1,
+  "action": "create",
+  "account": "personal3",
+  "account_existed_before": false,
+  "account_created": true,
+  "outcome": "authenticated",
+  "authenticated": true,
+  "child_exit_code": 0,
+  "identity": { "uuid": "529d66f3-…", "email": "me@example.com" },
+  "duplicate_of": null,
+  "pinned": true
+}
+```
+
+- `outcome` ∈ `authenticated` | `not_authenticated` | `uncertain` |
+  `spawn_failed`. `authenticated` is a convenience boolean for
+  `outcome == "authenticated"`.
+- `child_exit_code` is the raw login exit code (or `null` when the child could
+  not be started) — the only cancellation-vs-failure signal upstream provides.
+- `identity` is the reconciled **public** identity read locally after the login
+  (never a network call for this field, never a secret), or `null`.
+- `duplicate_of` names an existing account that shares this identity, as a
+  non-blocking advisory — distinct managed accounts are never collapsed.
+- `pinned` reports whether the account now carries an identity pin. A pin is
+  only ever *added* when absent; a reauth never moves an existing pin (that swap
+  is the drift the pin exists to report).
+
+An operational refusal is the standard `ok:false` error envelope, also written
+to `--result-file`: `RESERVED_NAME`, `NAME_INVALID`, `ACCOUNT_EXISTS` (create
+never replaces an existing account), `ACCOUNT_NOT_FOUND` (reauth target absent),
+`ACTION_IN_PROGRESS` (another action for this account is already running),
+`ACTION_INVALID`, `INVALID_ARGUMENTS`, `IO_ERROR`. `JSON_REQUIRED` and
+`RESULT_FILE_WRITE_FAILED` are emitted on stdout, because at that point there is
+no usable result file to write to.
+
+### What the action never does
+
+- It **never replaces** an existing account on `create`, and **never rolls back**
+  a created directory when authentication fails or is cancelled — the half-born
+  account is reported (`account_created:true`, `authenticated:false`), not
+  deleted.
+- It **never** changes the configured default, **never** mutates a directory
+  routing link, and **never** silently re-pins an identity.
+- It holds a **per-account action lock** across the whole action so two
+  overlapping create/reauths of the same account cannot interleave, while actions
+  on *different* accounts never block each other. The global routing lock is held
+  **only** for the brief name reservation on `create`, never across the
+  interactive login.
+- It transports **no secret**: no OAuth code, token, credential, cookie or
+  authorization header ever appears in the result document, the capability
+  document, or any claude-acc log.
+
 ## Versioning
 
 `schema_version` is per-command and starts at `1`. A consumer should refuse
@@ -487,3 +619,8 @@ to operate against a `schema_version` lower than it requires ("claude-acc
 needs updating") and refuse one higher than it understands ("claude-acc is
 newer than this build expects") — never silently best-effort parse either
 direction.
+
+The `account-action` contract additionally carries its own `contract_version`
+(also starting at `1`), bumped only when an existing field's meaning changes or
+a field is removed — never for an additive field, the same policy the
+`schema_version` numbers follow.

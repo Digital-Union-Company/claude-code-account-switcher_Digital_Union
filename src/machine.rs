@@ -12,10 +12,31 @@ use serde_json::{Value, json};
 
 pub const SCHEMA_VERSION: u64 = 1;
 
-/// Print `{"schema_version":1,"ok":true, ...fields}` as the one JSON document
-/// on stdout and return the exit code every success case under contract rule
-/// 4(A) uses. `fields` must be a JSON object; its keys are merged into the
-/// envelope.
+/// Build the `{"schema_version":1,"ok":true, ...fields}` success envelope as a
+/// `Value` without printing it — for a command whose structured document goes
+/// somewhere other than stdout (e.g. `account-action`'s `--result-file`), so
+/// the envelope shape has exactly one definition rather than a re-derived copy
+/// per transport. `fields` must be a JSON object; its keys are merged in.
+pub fn build_success(fields: Value) -> Value {
+    let mut doc = json!({ "schema_version": SCHEMA_VERSION, "ok": true });
+    merge_object(&mut doc, fields);
+    doc
+}
+
+/// [`build_success`] shaped as the `{"ok":false,"error":{...}}` operational
+/// failure envelope. `code` is a stable, per-command string a caller branches
+/// on; `message` is display-only; `details` is command-specific structured
+/// context (an empty object when there is none).
+pub fn build_error(code: &str, message: &str, details: Value) -> Value {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "ok": false,
+        "error": { "code": code, "message": message, "details": details },
+    })
+}
+
+/// Print the success envelope as the one JSON document on stdout and return the
+/// exit code every success case under contract rule 4(A) uses.
 pub fn success(fields: Value) -> i32 {
     emit_success_document(fields);
     0
@@ -28,22 +49,12 @@ pub fn success(fields: Value) -> i32 {
 /// gets the same never-silently-empty guarantee as every other command's,
 /// without a second, independently-unverified serialization path.
 pub fn emit_success_document(fields: Value) {
-    let mut doc = json!({ "schema_version": SCHEMA_VERSION, "ok": true });
-    merge_object(&mut doc, fields);
-    print_doc(&doc);
+    print_doc(&build_success(fields));
 }
 
 /// Print the structured operational-failure envelope and return exit code 1.
-/// `code` is a stable, per-command string a caller branches on; `message` is
-/// display-only; `details` is command-specific structured context (an empty
-/// object when there is none).
 pub fn error(code: &str, message: &str, details: Value) -> i32 {
-    let doc = json!({
-        "schema_version": SCHEMA_VERSION,
-        "ok": false,
-        "error": { "code": code, "message": message, "details": details },
-    });
-    print_doc(&doc);
+    print_doc(&build_error(code, message, details));
     1
 }
 

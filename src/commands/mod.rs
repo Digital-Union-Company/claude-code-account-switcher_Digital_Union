@@ -1,3 +1,4 @@
+pub mod account_action;
 pub mod activate;
 pub mod add;
 pub mod clone_settings;
