@@ -162,7 +162,9 @@ impl ActionError {
     fn message(&self) -> String {
         match self {
             ActionError::ReservedName(n) => {
-                format!("'{n}' is the reserved standard-account name; it cannot be created or reauthenticated through this contract")
+                format!(
+                    "'{n}' is the reserved standard-account name; it cannot be created or reauthenticated through this contract"
+                )
             }
             ActionError::NameInvalid => {
                 "account name must be ASCII letters, digits, hyphens or underscores".to_string()
@@ -404,10 +406,9 @@ fn write_result_file(path: &Path, doc: &Value) -> io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "result path has no file name"))?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "result path has no file name")
+    })?;
     let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
     fs::write(&tmp, serialized.as_bytes())?;
     let renamed = fs::rename(&tmp, path);
@@ -528,7 +529,10 @@ mod tests {
 
     /// A fake login that writes a local identity (as a real successful login
     /// would) and returns exit 0.
-    fn fake_login_success(uuid: &'static str, email: Option<&'static str>) -> impl Fn(&Path) -> LoginExit {
+    fn fake_login_success(
+        uuid: &'static str,
+        email: Option<&'static str>,
+    ) -> impl Fn(&Path) -> LoginExit {
         move |acc_dir: &Path| {
             let oauth = match email {
                 Some(e) => json!({"oauthAccount": {"accountUuid": uuid, "emailAddress": e}}),
@@ -543,11 +547,26 @@ mod tests {
 
     #[test]
     fn classify_covers_every_outcome_branch() {
-        assert_eq!(classify_outcome(LoginExit::Exited(0), true), Outcome::Authenticated);
-        assert_eq!(classify_outcome(LoginExit::Exited(0), false), Outcome::Uncertain);
-        assert_eq!(classify_outcome(LoginExit::Exited(1), true), Outcome::NotAuthenticated);
-        assert_eq!(classify_outcome(LoginExit::Exited(130), false), Outcome::NotAuthenticated);
-        assert_eq!(classify_outcome(LoginExit::SpawnFailed, false), Outcome::SpawnFailed);
+        assert_eq!(
+            classify_outcome(LoginExit::Exited(0), true),
+            Outcome::Authenticated
+        );
+        assert_eq!(
+            classify_outcome(LoginExit::Exited(0), false),
+            Outcome::Uncertain
+        );
+        assert_eq!(
+            classify_outcome(LoginExit::Exited(1), true),
+            Outcome::NotAuthenticated
+        );
+        assert_eq!(
+            classify_outcome(LoginExit::Exited(130), false),
+            Outcome::NotAuthenticated
+        );
+        assert_eq!(
+            classify_outcome(LoginExit::SpawnFailed, false),
+            Outcome::SpawnFailed
+        );
     }
 
     #[test]
@@ -572,7 +591,10 @@ mod tests {
         assert!(!report.existed_before);
         assert_eq!(report.child_exit_code, Some(0));
         assert_eq!(report.identity.as_ref().unwrap().uuid, "u-new");
-        assert_eq!(report.identity.as_ref().unwrap().email.as_deref(), Some("new@example.com"));
+        assert_eq!(
+            report.identity.as_ref().unwrap().email.as_deref(),
+            Some("new@example.com")
+        );
         assert!(report.pinned, "a freshly authenticated account is pinned");
         assert!(c.account_path("fresh").is_dir());
         let _ = fs::remove_dir_all(&c.base_dir);
@@ -587,8 +609,14 @@ mod tests {
         let err = perform_action(&c, Action::Create, "taken", false, &login).unwrap_err();
         assert_eq!(err, ActionError::AccountExists("taken".to_string()));
         // The pre-existing content is untouched — never silently replaced.
-        assert_eq!(fs::read_to_string(c.account_path("taken").join("marker")).unwrap(), "keep me");
-        assert!(!c.account_path("taken").join(".claude.json").exists(), "login must not have run");
+        assert_eq!(
+            fs::read_to_string(c.account_path("taken").join("marker")).unwrap(),
+            "keep me"
+        );
+        assert!(
+            !c.account_path("taken").join(".claude.json").exists(),
+            "login must not have run"
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -604,7 +632,10 @@ mod tests {
             perform_action(&c, Action::Create, "bad/name", false, &login).unwrap_err(),
             ActionError::NameInvalid
         );
-        assert!(c.list_accounts().unwrap().is_empty(), "no account dir created for a bad name");
+        assert!(
+            c.list_accounts().unwrap().is_empty(),
+            "no account dir created for a bad name"
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -620,7 +651,10 @@ mod tests {
         assert!(!report.pinned);
         assert!(report.identity.is_none());
         assert_eq!(report.child_exit_code, Some(1));
-        assert!(c.account_path("halfborn").is_dir(), "the account dir is not rolled back");
+        assert!(
+            c.account_path("halfborn").is_dir(),
+            "the account dir is not rolled back"
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -642,7 +676,10 @@ mod tests {
         let report = perform_action(&c, Action::Create, "nostart", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::SpawnFailed);
         assert_eq!(report.child_exit_code, None);
-        assert!(report.created, "the dir was reserved before the spawn attempt");
+        assert!(
+            report.created,
+            "the dir was reserved before the spawn attempt"
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -681,7 +718,10 @@ mod tests {
         fs::create_dir_all(&acc).unwrap();
         identity::write_lock_at(
             &acc.join(identity::LOCK_FILE),
-            &Identity { uuid: "u-original".to_string(), email: None },
+            &Identity {
+                uuid: "u-original".to_string(),
+                email: None,
+            },
         )
         .unwrap();
         let login = fake_login_success("u-different", Some("other@example.com"));
@@ -722,17 +762,15 @@ mod tests {
         let c = scratch("concurrent");
         let acc = "busy";
         // A login that, while "running", asserts a second action is refused.
-        let inner = std::sync::Arc::new(AppConfig { base_dir: c.base_dir.clone() });
+        let inner = std::sync::Arc::new(AppConfig {
+            base_dir: c.base_dir.clone(),
+        });
         let login = {
             let inner = inner.clone();
             move |acc_dir: &Path| {
-                let nested = perform_action(
-                    &inner,
-                    Action::Reauth,
-                    "busy",
-                    false,
-                    &|_: &Path| LoginExit::Exited(0),
-                );
+                let nested = perform_action(&inner, Action::Reauth, "busy", false, &|_: &Path| {
+                    LoginExit::Exited(0)
+                });
                 assert_eq!(
                     nested.unwrap_err(),
                     ActionError::ActionInProgress("busy".to_string()),
@@ -755,21 +793,28 @@ mod tests {
     #[test]
     fn an_action_for_a_different_account_is_not_blocked() {
         let c = scratch("concurrent-distinct");
-        let inner = AppConfig { base_dir: c.base_dir.clone() };
+        let inner = AppConfig {
+            base_dir: c.base_dir.clone(),
+        };
         let login = move |acc_dir: &Path| {
             // A different account must acquire its own lock freely.
-            let other = perform_action(
-                &inner,
-                Action::Reauth,
-                "other",
-                false,
-                &|d: &Path| {
-                    fs::write(d.join(".claude.json"), json!({"oauthAccount": {"accountUuid": "u-other"}}).to_string()).unwrap();
-                    LoginExit::Exited(0)
-                },
+            let other = perform_action(&inner, Action::Reauth, "other", false, &|d: &Path| {
+                fs::write(
+                    d.join(".claude.json"),
+                    json!({"oauthAccount": {"accountUuid": "u-other"}}).to_string(),
+                )
+                .unwrap();
+                LoginExit::Exited(0)
+            });
+            assert!(
+                other.is_ok(),
+                "a different account must not be blocked: {other:?}"
             );
-            assert!(other.is_ok(), "a different account must not be blocked: {other:?}");
-            fs::write(acc_dir.join(".claude.json"), json!({"oauthAccount": {"accountUuid": "u-main"}}).to_string()).unwrap();
+            fs::write(
+                acc_dir.join(".claude.json"),
+                json!({"oauthAccount": {"accountUuid": "u-main"}}).to_string(),
+            )
+            .unwrap();
             LoginExit::Exited(0)
         };
         fs::create_dir_all(c.account_path("other")).unwrap();
@@ -794,8 +839,16 @@ mod tests {
         let report = perform_action(&c, Action::Create, "newcomer", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::Authenticated);
 
-        assert_eq!(c.get_default().unwrap().as_deref(), Some("sibling"), "default unchanged");
-        assert_eq!(fs::read_to_string(c.links_path()).unwrap(), before_links, "links unchanged");
+        assert_eq!(
+            c.get_default().unwrap().as_deref(),
+            Some("sibling"),
+            "default unchanged"
+        );
+        assert_eq!(
+            fs::read_to_string(c.links_path()).unwrap(),
+            before_links,
+            "links unchanged"
+        );
         assert!(c.account_path("sibling").is_dir(), "sibling preserved");
         let _ = fs::remove_dir_all(&c.base_dir);
     }
@@ -811,7 +864,10 @@ mod tests {
             created: true,
             outcome: Outcome::Authenticated,
             child_exit_code: Some(0),
-            identity: Some(Identity { uuid: "u".to_string(), email: Some("e@x.com".to_string()) }),
+            identity: Some(Identity {
+                uuid: "u".to_string(),
+                email: Some("e@x.com".to_string()),
+            }),
             duplicate_of: None,
             pinned: true,
         };
@@ -826,12 +882,28 @@ mod tests {
         assert_eq!(doc["identity"]["email"], "e@x.com");
         // Exactly the fields a consumer needs — no token/code/credential key.
         let obj = doc.as_object().unwrap();
-        for forbidden in ["token", "access_token", "refresh_token", "code", "credential", "credentials", "authorization", "password", "cookie"] {
-            assert!(!obj.contains_key(forbidden), "no secret field '{forbidden}'");
+        for forbidden in [
+            "token",
+            "access_token",
+            "refresh_token",
+            "code",
+            "credential",
+            "credentials",
+            "authorization",
+            "password",
+            "cookie",
+        ] {
+            assert!(
+                !obj.contains_key(forbidden),
+                "no secret field '{forbidden}'"
+            );
         }
         let idobj = doc["identity"].as_object().unwrap();
         for forbidden in ["token", "access_token", "refresh_token", "credential"] {
-            assert!(!idobj.contains_key(forbidden), "identity carries no secret '{forbidden}'");
+            assert!(
+                !idobj.contains_key(forbidden),
+                "identity carries no secret '{forbidden}'"
+            );
         }
     }
 
@@ -842,14 +914,26 @@ mod tests {
         let c = scratch("sentinel");
         let sentinel = "SENTINEL_TOKEN_sk-DO-NOT-LEAK";
         let login = move |acc_dir: &Path| {
-            fs::write(acc_dir.join(".credentials.json"), json!({"access_token": sentinel}).to_string()).unwrap();
-            fs::write(acc_dir.join(".claude.json"), json!({"oauthAccount": {"accountUuid": "u-s", "emailAddress": "s@x.com"}}).to_string()).unwrap();
+            fs::write(
+                acc_dir.join(".credentials.json"),
+                json!({"access_token": sentinel}).to_string(),
+            )
+            .unwrap();
+            fs::write(
+                acc_dir.join(".claude.json"),
+                json!({"oauthAccount": {"accountUuid": "u-s", "emailAddress": "s@x.com"}})
+                    .to_string(),
+            )
+            .unwrap();
             LoginExit::Exited(0)
         };
         let report = perform_action(&c, Action::Create, "sec", false, &login).unwrap();
         let doc = report_to_doc(&report);
         let serialized = serde_json::to_string(&doc).unwrap();
-        assert!(!serialized.contains(sentinel), "the credential sentinel must never appear in the outcome document");
+        assert!(
+            !serialized.contains(sentinel),
+            "the credential sentinel must never appear in the outcome document"
+        );
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -900,7 +984,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
-        assert!(leftovers.is_empty(), "no temp file left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind: {leftovers:?}"
+        );
         let _ = fs::remove_dir_all(&dir.base_dir);
     }
 }
