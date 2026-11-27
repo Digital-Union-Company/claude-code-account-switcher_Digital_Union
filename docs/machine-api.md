@@ -591,7 +591,7 @@ An operational refusal is the standard `ok:false` error envelope, also written
 to `--result-file`: `RESERVED_NAME`, `NAME_INVALID`, `ACCOUNT_EXISTS` (create
 never replaces an existing account), `ACCOUNT_NOT_FOUND` (reauth target absent),
 `ACTION_IN_PROGRESS` (another action for this account is already running),
-`ACTION_INVALID`, `INVALID_ARGUMENTS`, `IO_ERROR`. `JSON_REQUIRED` and
+`ACTION_INVALID`, `IO_ERROR`. `JSON_REQUIRED`, `INVALID_ARGUMENTS` and
 `RESULT_FILE_WRITE_FAILED` are emitted on stdout, because at that point there is
 no usable result file to write to.
 
@@ -607,7 +607,10 @@ no usable result file to write to.
   overlapping create/reauths of the same account cannot interleave, while actions
   on *different* accounts never block each other. The global routing lock is held
   **only** for the brief name reservation on `create`, never across the
-  interactive login.
+  interactive login. (The lock serializes `account-action` invocations with each
+  other; it does not exclude a concurrent human `add`/`login` on the same
+  account, which take no such lock — the same pre-existing human-vs-human
+  exposure.)
 - It transports **no secret**: no OAuth code, token, credential, cookie or
   authorization header ever appears in the result document, the capability
   document, or any claude-acc log.

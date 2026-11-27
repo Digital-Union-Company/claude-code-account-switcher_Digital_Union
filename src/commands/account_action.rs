@@ -117,8 +117,10 @@ impl Outcome {
 }
 
 /// A defined, non-secret conclusion of an action that actually ran a login
-/// attempt. Serialized into the `ok:true` outcome document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// attempt. Serialized into the `ok:true` outcome document. (No `Eq`: it
+/// carries an `Identity`, which is `PartialEq` but not `Eq`; tests assert on
+/// individual fields rather than whole-report equality.)
+#[derive(Debug, Clone)]
 pub struct ActionReport {
     pub action: Action,
     pub account: String,
@@ -392,8 +394,11 @@ fn probe_fields() -> Value {
     })
 }
 
-/// The full capability document (for tests and callers that want the envelope).
-pub fn probe_doc() -> Value {
+/// The full capability document (envelope + fields). Only the field builder
+/// [`probe_fields`] is used in the running binary (via `machine::success`); this
+/// whole-envelope form exists for the tests that assert on the document.
+#[cfg(test)]
+fn probe_doc() -> Value {
     machine::build_success(probe_fields())
 }
 
@@ -410,12 +415,14 @@ fn write_result_file(path: &Path, doc: &Value) -> io::Result<()> {
         io::Error::new(io::ErrorKind::InvalidInput, "result path has no file name")
     })?;
     let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    fs::write(&tmp, serialized.as_bytes())?;
-    let renamed = fs::rename(&tmp, path);
-    if renamed.is_err() {
+    // Clean up our own temp if EITHER the write or the rename fails, so a
+    // disk-full / permission error never leaves a stray partial file behind
+    // (mirrors config::write_file_atomic_seq).
+    let result = fs::write(&tmp, serialized.as_bytes()).and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    renamed
+    result
 }
 
 /// The production interactive login: run `claude auth login` scoped to
@@ -737,9 +744,15 @@ mod tests {
     // --- duplicate identity advisory ---
 
     #[test]
-    fn a_duplicate_subscription_identity_is_advised() {
+    fn the_duplicate_advisory_does_not_false_positive_without_a_live_audit() {
+        // The duplicate-identity advisory is best-effort and keyed on a LIVE
+        // audit of the new account (identity::find_duplicate_account ->
+        // audit_account: a token read + profile fetch) — the same path add/login
+        // use. With no retrievable token (as here, and as in any offline unit
+        // test) it must resolve to None and never emit a false "duplicate_of"
+        // claim. The positive advisory needs a real audit (network) and is a
+        // property of the shared identity path, not re-exercisable here.
         let c = scratch("dup");
-        // An existing account whose cached identity is u-shared.
         let existing = c.account_path("personal1");
         fs::create_dir_all(&existing).unwrap();
         fs::write(
@@ -747,11 +760,10 @@ mod tests {
             json!({"uuid": "u-shared", "email": "shared@example.com"}).to_string(),
         )
         .unwrap();
-        // Create a new account that authenticates as the SAME identity.
         let login = fake_login_success("u-shared", Some("shared@example.com"));
         let report = perform_action(&c, Action::Create, "personal2", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::Authenticated);
-        assert_eq!(report.duplicate_of.as_deref(), Some("personal1"));
+        assert_eq!(report.duplicate_of, None);
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -989,5 +1001,109 @@ mod tests {
             "no temp file left behind: {leftovers:?}"
         );
         let _ = fs::remove_dir_all(&dir.base_dir);
+    }
+
+    #[test]
+    fn write_result_file_fails_cleanly_when_the_target_is_a_directory() {
+        let dir = scratch("resultfile-dir");
+        let target = dir.base_dir.join("a-dir");
+        fs::create_dir_all(&target).unwrap();
+        let doc = probe_doc();
+        assert!(
+            write_result_file(&target, &doc).is_err(),
+            "writing over a directory must fail"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&dir.base_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp cleaned on failure: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir.base_dir);
+    }
+
+    // --- action-lock / routing-lock discipline ---
+
+    #[test]
+    fn the_action_lock_is_released_after_an_in_lock_refusal() {
+        // AccountNotFound is returned from INSIDE the action lock; the lock must
+        // still release, so a later action for the same name is not wrongly
+        // reported as ACTION_IN_PROGRESS.
+        let c = scratch("lock-release");
+        let refused = perform_action(&c, Action::Reauth, "later", false, &|_: &Path| {
+            LoginExit::Exited(0)
+        });
+        assert_eq!(
+            refused.unwrap_err(),
+            ActionError::AccountNotFound("later".to_string())
+        );
+        let login = fake_login_success("u-later", None);
+        let report = perform_action(&c, Action::Create, "later", false, &login).unwrap();
+        assert_eq!(report.outcome, Outcome::Authenticated);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn the_routing_lock_is_free_while_the_login_runs() {
+        // Property: the global routing lock must NOT be held across the
+        // interactive login (only across the brief name reservation).
+        let c = scratch("routing-free");
+        let base = c.base_dir.clone();
+        let login = move |acc_dir: &Path| {
+            let probe = AppConfig {
+                base_dir: base.clone(),
+            };
+            assert!(
+                probe.try_lock_routing().unwrap().is_some(),
+                "the routing lock must be free while the login is hosted"
+            );
+            fs::write(
+                acc_dir.join(".claude.json"),
+                json!({"oauthAccount": {"accountUuid": "u-rf"}}).to_string(),
+            )
+            .unwrap();
+            LoginExit::Exited(0)
+        };
+        let report = perform_action(&c, Action::Create, "rf", false, &login).unwrap();
+        assert_eq!(report.outcome, Outcome::Authenticated);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    // --- run_json routing / validation (the thin CLI shell) ---
+
+    #[test]
+    fn run_json_without_the_json_flag_is_refused() {
+        let c = scratch("no-json");
+        assert_eq!(run_json(&c, false, false, None, None, None, false), 1);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn run_json_probe_returns_zero() {
+        let c = scratch("probe");
+        assert_eq!(run_json(&c, true, true, None, None, None, false), 0);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn run_json_with_an_invalid_action_writes_an_error_document_to_the_result_file() {
+        // Action::parse fails before any login is hosted, so this exercises the
+        // result-file error path without spawning anything.
+        let c = scratch("bad-action");
+        let out = c.base_dir.join("result.json");
+        let code = run_json(
+            &c,
+            true,
+            false,
+            Some("delete"),
+            Some("x"),
+            Some(out.to_str().unwrap()),
+            false,
+        );
+        assert_eq!(code, 1);
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["error"]["code"], "ACTION_INVALID");
+        let _ = fs::remove_dir_all(&c.base_dir);
     }
 }

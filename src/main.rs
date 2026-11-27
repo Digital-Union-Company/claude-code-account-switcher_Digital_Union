@@ -417,6 +417,7 @@ fn is_machine_mode(command: &Option<Commands>) -> bool {
             | Some(Commands::Usage { json: true })
             | Some(Commands::Doctor { json: true })
             | Some(Commands::Link { json: true, .. })
+            | Some(Commands::AccountAction { json: true, .. })
     )
 }
 
@@ -474,8 +475,12 @@ fn main() {
     // effect. Its own handler refuses a missing store with a structured
     // `NOT_INITIALIZED` instead (docs/machine-api.md). Every other command,
     // including the read-only `--json` ones, still initializes as before.
-    let machine_link = matches!(cli.command, Some(Commands::Link { json: true, .. }));
-    if !machine_link {
+    // `account-action --probe` is capability discovery that must touch nothing
+    // (docs/machine-api.md), so it skips init too — unlike a create/reauth,
+    // which needs the accounts store and initializes as every other command does.
+    let skip_init = matches!(cli.command, Some(Commands::Link { json: true, .. }))
+        || matches!(cli.command, Some(Commands::AccountAction { probe: true, .. }));
+    if !skip_init {
         match config.init() {
             Ok(()) => {}
             // A `--json` invocation must still produce its one structured JSON
@@ -775,6 +780,14 @@ mod tests {
         })));
         assert!(is_machine_mode(&Some(Commands::Usage { json: true })));
         assert!(is_machine_mode(&Some(Commands::Doctor { json: true })));
+        assert!(is_machine_mode(&Some(Commands::AccountAction {
+            json: true,
+            probe: true,
+            action: None,
+            account: None,
+            result_file: None,
+            seed: false,
+        })));
 
         assert!(!is_machine_mode(&Some(Commands::List { json: false })));
         assert!(!is_machine_mode(&Some(Commands::Links { json: false })));
