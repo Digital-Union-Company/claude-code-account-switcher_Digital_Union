@@ -1018,7 +1018,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
-        assert!(leftovers.is_empty(), "temp cleaned on failure: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp cleaned on failure: {leftovers:?}"
+        );
         let _ = fs::remove_dir_all(&dir.base_dir);
     }
 

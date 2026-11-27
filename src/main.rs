@@ -479,7 +479,10 @@ fn main() {
     // (docs/machine-api.md), so it skips init too — unlike a create/reauth,
     // which needs the accounts store and initializes as every other command does.
     let skip_init = matches!(cli.command, Some(Commands::Link { json: true, .. }))
-        || matches!(cli.command, Some(Commands::AccountAction { probe: true, .. }));
+        || matches!(
+            cli.command,
+            Some(Commands::AccountAction { probe: true, .. })
+        );
     if !skip_init {
         match config.init() {
             Ok(()) => {}
