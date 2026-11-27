@@ -592,6 +592,7 @@ fn probe_doc() -> Value {
 
 /// A validated, caller-owned result-file destination the outcome document will
 /// be published to. Established BEFORE any account mutation (F1).
+#[derive(Debug)]
 struct ResultChannel {
     /// The destination's parent directory (validated to exist and be a real
     /// directory outside the provider/standard stores).
