@@ -751,7 +751,11 @@ fn prepare_result_channel(
         .create_new(true)
         .open(&probe)
     {
-        Ok(_) => {
+        Ok(file) => {
+            // Close the handle BEFORE removing — on Windows a file opened
+            // without share-delete cannot be removed while a handle is open,
+            // which would otherwise leave the probe file behind.
+            drop(file);
             let _ = fs::remove_file(&probe);
         }
         Err(e) => {
@@ -829,9 +833,7 @@ fn publish_result(channel: &ResultChannel, doc: &Value) -> io::Result<()> {
 /// requires it and must NOT manufacture it as a side effect (F4) — an
 /// uninitialized store is a structured `NOT_INITIALIZED` refusal.
 fn store_initialized(config: &AppConfig) -> bool {
-    config.accounts_dir().is_dir()
-        && config.config_path().exists()
-        && config.links_path().exists()
+    config.accounts_dir().is_dir() && config.config_path().exists() && config.links_path().exists()
 }
 
 /// The production interactive login: run `claude auth login` scoped to
@@ -1079,10 +1081,20 @@ mod tests {
 
     #[test]
     fn reserved_device_names_are_refused_as_unsafe() {
-        for n in ["con", "CON", "nul", "Aux", "prn", "com1", "LPT9", "con.json"] {
+        for n in [
+            "con", "CON", "nul", "Aux", "prn", "com1", "LPT9", "con.json",
+        ] {
             assert!(is_platform_unsafe_name(n), "{n} must be unsafe");
         }
-        for n in ["work", "console", "com", "com10", "lpt", "com0extra", "nulls"] {
+        for n in [
+            "work",
+            "console",
+            "com",
+            "com10",
+            "lpt",
+            "com0extra",
+            "nulls",
+        ] {
             assert!(!is_platform_unsafe_name(n), "{n} must be allowed");
         }
     }
@@ -1200,10 +1212,7 @@ mod tests {
             "the dir was reserved before the spawn attempt"
         );
         // spawn_failed does not demand reconciliation — nothing ran.
-        assert_eq!(
-            report_to_doc(&report)["requires_reconciliation"],
-            false
-        );
+        assert_eq!(report_to_doc(&report)["requires_reconciliation"], false);
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -1688,7 +1697,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".cm9tmp."))
             .collect();
-        assert!(leftovers.is_empty(), "temp cleaned on refusal: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp cleaned on refusal: {leftovers:?}"
+        );
         let _ = fs::remove_dir_all(dest.parent().unwrap());
         let _ = fs::remove_dir_all(&c.base_dir);
     }
