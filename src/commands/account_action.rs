@@ -516,7 +516,6 @@ pub fn run_json(
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
