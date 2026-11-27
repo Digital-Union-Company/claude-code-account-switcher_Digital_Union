@@ -511,13 +511,31 @@ progress is simply not available upstream. The honest design that follows:
   and exactly which capabilities exist (and which do not), performing no
   authentication and touching nothing.
 
-The outcome is **coarse by necessity**: `authenticated`, `not_authenticated`
-(the login exited non-zero — upstream does not let claude-acc tell a user
-*cancellation* apart from a *failure*), `uncertain` (exited success yet no local
-identity landed), or `spawn_failed`. This limitation is reported in the probe
-output rather than papered over. The `contract_version` is independent of the
-envelope `schema_version`: it is the number a consumer pins to decide whether
-this create/reauth contract is present, and it starts at `1`.
+The outcome is **coarse by necessity**, and deliberately **truthful about what
+was actually verified**. A clean login *exit* together with a local
+`.claude.json` identity is **not** proof the account is authenticated now — that
+file is Claude Code's own cache and can be stale from an earlier login. So
+`authenticated` is reported **only** when an authoritative live audit (a token
+read + profile fetch — the same substrate `add`/`login`/`doctor` use) confirms a
+current credential. The full vocabulary:
+
+- `authenticated` — a live audit confirmed a current credential.
+- `login_completed` — the login exited `0` and a local identity is present, but
+  it was **not** authoritatively verified (offline / no token). The consumer
+  **must reconcile** (run `doctor`/`list`) before treating the account as signed
+  in.
+- `login_completed_no_identity` — exited `0` yet no local identity landed.
+- `login_failed` — the login exited non-zero. Upstream cannot tell a user
+  *cancellation* from a *failure*, and for a **reauth** this does **not** mean
+  the account lost whatever authentication it already had — reconcile.
+- `spawn_failed` — the login child could not be started at all.
+
+Exactly one authoritative audit is performed per action, reused for both the
+`authenticated` determination and the duplicate-account disclosure (never two
+network round-trips). This limitation is reported in the probe output rather
+than papered over. The `contract_version` is independent of the envelope
+`schema_version`: it is the number a consumer pins to decide whether this
+create/reauth contract is present, and it is `1`.
 
 ### Capability discovery — `--probe`
 
@@ -535,9 +553,14 @@ no login is hosted):
   "actions": ["create", "reauth"],
   "interactive_hosting": "caller_terminal",
   "result_channel": "result_file",
+  "result_file_requirements": "absolute path in a caller-owned directory outside the provider and standard Claude stores; must not already exist",
   "oauth_code_entry_feedback": "unavailable",
   "progress_granularity": "final_outcome_only",
   "distinguishes_cancellation_from_failure": false,
+  "outcomes": ["authenticated", "login_completed", "login_completed_no_identity", "login_failed", "spawn_failed"],
+  "authenticated_requires_live_audit": true,
+  "reconciliation": "run doctor/list after any outcome other than 'authenticated' before trusting account state",
+  "seed_supported_actions": ["create"],
   "secret_safe": true
 }
 ```
@@ -547,8 +570,25 @@ no login is hosted):
 `--json` is required (it selects this machine contract). `--action`, `--account`
 and `--result-file` are required unless `--probe` is given. `create` reserves a
 new managed account directory, then hosts the login; `reauth` requires the
-managed account to already exist. `--seed` (create only) seeds the new directory
-from `~/.claude/`, exactly like `add --seed`.
+managed account to already exist. `--seed` applies **only to `create`** (it
+seeds the new directory from `~/.claude/`, exactly like `add --seed`); passing it
+with `reauth` is refused (`SEED_NOT_SUPPORTED`), never silently ignored.
+
+A create/reauth requires an **already-initialized** store and never manufactures
+one: on an uninitialized store it refuses with `NOT_INITIALIZED` rather than
+creating routing state as a side effect of a GUI-triggered action.
+
+**The `--result-file` is validated before any profile creation or login (F1).**
+It must be an **absolute** path, naming a file in an **existing, real directory**
+that is **outside** the claude-acc store and the standard Claude configuration,
+and it **must not already exist**. The provider proves the directory is writable
+up front, then publishes the single document atomically (unique temp + rename)
+**without replacing** any file that appears at the destination. A pre-existing or
+stale file is therefore never mistaken for this action's outcome. One residual
+race remains and is disclosed honestly: there is no portable atomic no-clobber
+rename, so a destination created in the narrow window between the final
+existence re-check and the rename could still be replaced — supply a fresh,
+unique destination per invocation.
 
 The single outcome document is written to `--result-file` as the same envelope
 shape every `--json` command uses. A **success** (`ok:true`) means the action
@@ -565,8 +605,10 @@ read the `outcome` field for that:
   "account": "personal3",
   "account_existed_before": false,
   "account_created": true,
-  "outcome": "authenticated",
-  "authenticated": true,
+  "outcome": "login_completed",
+  "authenticated": false,
+  "requires_reconciliation": true,
+  "identity_source": "local_cache",
   "child_exit_code": 0,
   "identity": { "uuid": "529d66f3-…", "email": "me@example.com" },
   "duplicate_of": null,
@@ -574,26 +616,45 @@ read the `outcome` field for that:
 }
 ```
 
-- `outcome` ∈ `authenticated` | `not_authenticated` | `uncertain` |
-  `spawn_failed`. `authenticated` is a convenience boolean for
-  `outcome == "authenticated"`.
+- `outcome` ∈ `authenticated` | `login_completed` | `login_completed_no_identity`
+  | `login_failed` | `spawn_failed` (see the vocabulary above).
+- `authenticated` is a convenience boolean, `true` **only** for
+  `outcome == "authenticated"` — i.e. only when a live audit confirmed it.
+- `requires_reconciliation` is `true` for every outcome except an
+  authoritatively confirmed `authenticated` and a `spawn_failed` where nothing
+  ran. When it is `true`, run `doctor`/`list` before trusting the account state.
+- `identity_source` ∈ `live_audit` | `local_cache` | `none` — where the
+  `identity` field came from. `local_cache` means it is **unverified**.
 - `child_exit_code` is the raw login exit code (or `null` when the child could
   not be started) — the only cancellation-vs-failure signal upstream provides.
-- `identity` is the reconciled **public** identity read locally after the login
-  (never a network call for this field, never a secret), or `null`.
+- `identity` is the reconciled **public** identity (from the live audit when
+  `identity_source == "live_audit"`, otherwise the local cache), or `null`.
+  Never a secret.
 - `duplicate_of` names an existing account that shares this identity, as a
-  non-blocking advisory — distinct managed accounts are never collapsed.
+  non-blocking advisory — only ever populated from the single live audit (so it
+  is `null` whenever authentication was not authoritatively confirmed). Distinct
+  managed accounts are never collapsed.
 - `pinned` reports whether the account now carries an identity pin. A pin is
   only ever *added* when absent; a reauth never moves an existing pin (that swap
   is the drift the pin exists to report).
 
-An operational refusal is the standard `ok:false` error envelope, also written
-to `--result-file`: `RESERVED_NAME`, `NAME_INVALID`, `ACCOUNT_EXISTS` (create
-never replaces an existing account), `ACCOUNT_NOT_FOUND` (reauth target absent),
-`ACTION_IN_PROGRESS` (another action for this account is already running),
-`ACTION_INVALID`, `IO_ERROR`. `JSON_REQUIRED`, `INVALID_ARGUMENTS` and
-`RESULT_FILE_WRITE_FAILED` are emitted on stdout, because at that point there is
-no usable result file to write to.
+An operational refusal is the standard `ok:false` error envelope, written to the
+validated `--result-file`: `RESERVED_NAME`, `NAME_INVALID`, `NAME_UNSAFE` (a
+reserved device name), `ACCOUNT_EXISTS` (create never replaces an existing
+account), `ACCOUNT_NOT_FOUND` (reauth target absent), `PROFILE_NOT_CONTAINED`
+(the target is not a real account directory inside the managed-account root — a
+symlink/junction/reparse redirect), `SEED_NOT_SUPPORTED`, `NOT_INITIALIZED`,
+`ACTION_IN_PROGRESS` (another lifecycle operation for this account is already
+running), `ACTION_INVALID`, `IO_ERROR`.
+
+Errors about the **invocation shape** (`JSON_REQUIRED`, `INVALID_ARGUMENTS`) and
+about the **result channel itself** (`RESULT_FILE_NOT_ABSOLUTE`,
+`RESULT_FILE_EXISTS`, `RESULT_DIR_NOT_FOUND`, `RESULT_DIR_NOT_A_DIRECTORY`,
+`RESULT_FILE_FORBIDDEN_LOCATION`, `RESULT_FILE_NOT_WRITABLE`) are emitted on
+**stdout**, because at that point there is no trustworthy result file to write
+to. `RESULT_FILE_PUBLISH_FAILED` is also emitted on stdout and is special: the
+action **already ran** and may have changed account state, so it is an
+**uncertain** outcome — reconcile and do **not** automatically retry.
 
 ### What the action never does
 
@@ -603,14 +664,35 @@ no usable result file to write to.
   deleted.
 - It **never** changes the configured default, **never** mutates a directory
   routing link, and **never** silently re-pins an identity.
-- It holds a **per-account action lock** across the whole action so two
-  overlapping create/reauths of the same account cannot interleave, while actions
-  on *different* accounts never block each other. The global routing lock is held
-  **only** for the brief name reservation on `create`, never across the
-  interactive login. (The lock serializes `account-action` invocations with each
-  other; it does not exclude a concurrent human `add`/`login` on the same
-  account, which take no such lock — the same pre-existing human-vs-human
-  exposure.)
+- It **never follows a redirected profile**: the target account must be a real
+  directory contained directly within the managed-account root (not a symlink,
+  junction or reparse point), so a login is never redirected into another
+  account or the standard Claude configuration.
+
+### Concurrency and locking
+
+- A **per-account lifecycle lock** is held across the whole action, including the
+  login. It is the **same** lock the human `add`/`login`/`remove` take for that
+  account, so a GUI-triggered action and a human lifecycle operation on the
+  **same** account cannot overlap (the second is refused as
+  `ACTION_IN_PROGRESS`, or waits, rather than corrupting state). Operations on
+  **different** accounts never block each other. The lock key lives on the same
+  volume as the account directories, so two case-variant spellings of one
+  account on a case-insensitive filesystem share one lock.
+- On **macOS**, a `claude auth login` snapshots/restores the standard account's
+  Keychain entries as a side effect. A **global auth-side-effect lock**
+  serializes that snapshot/restore bracket across **all** cooperating logins
+  (including `login default`, which deliberately rewrites those entries), so two
+  logins cannot interleave and leave the standard account holding the wrong
+  token. It is a no-op off macOS and is held only briefly around the login
+  bracket. Lock ordering is always per-account → auth-side-effect, and the
+  routing lock is disjoint — no deadlock.
+- The **global routing lock** is held **only** for the brief name reservation on
+  `create`, **never** across the interactive login.
+- These locks bind only **cooperating current binaries**. An older claude-acc, a
+  direct hand-edit, the zsh port (which implements no file locking, exactly as it
+  does not for the routing lock), or any non-cooperating process is **not**
+  excluded — the same scope the routing lock documents.
 - It transports **no secret**: no OAuth code, token, credential, cookie or
   authorization header ever appears in the result document, the capability
   document, or any claude-acc log.

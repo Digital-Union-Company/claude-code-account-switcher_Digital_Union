@@ -617,6 +617,108 @@ impl AppConfig {
             }
         }
     }
+
+    // --- per-account lifecycle lock ---
+    //
+    // Serializes lifecycle operations — create / reauth / login / remove — on
+    // ONE account, keyed by account name, so (for example) a machine
+    // `account-action reauth` and a human `remove` of the same account cannot
+    // overlap and write into a directory the other is tearing down. It is
+    // deliberately distinct from the routing lock (which must never be held
+    // across an interactive login) and from the auth-side-effect lock below:
+    // the routing lock protects the shared links/default store, this one a
+    // single account's lifecycle. Advisory, released when the handle closes, so
+    // a crashed holder leaves nothing stale and nothing is deleted by age.
+    //
+    // It binds only cooperating writers in THIS binary. An older binary, the
+    // zsh port (which implements no file locking at all, exactly as it does not
+    // for the routing lock), a direct hand-edit, or any non-cooperating process
+    // is not excluded — documented in docs/machine-api.md, never claimed
+    // otherwise.
+    //
+    // The lock file lives beside the account store, on the SAME volume as the
+    // `accounts/` directories it guards. So two case-variant spellings of one
+    // account on a case-insensitive filesystem (`Work` vs `work`) open the SAME
+    // lock file — just as they resolve to the same account directory — and
+    // cannot obtain independent locks. On a case-sensitive filesystem the two
+    // are genuinely different accounts and correctly get different locks.
+    pub fn account_lifecycle_lock_path(&self, name: &str) -> PathBuf {
+        self.base_dir
+            .join(format!(".account-lifecycle.{name}.lock"))
+    }
+
+    fn open_account_lifecycle_lock_file(&self, name: &str) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.account_lifecycle_lock_path(name))
+    }
+
+    /// Acquire the per-account lifecycle lock, waiting without a bound — for the
+    /// human add/login/remove writers, whose contract is "succeeds unless a real
+    /// I/O error". The returned handle is the guard; the lock releases on drop
+    /// (or on process exit, which closes the handle).
+    pub fn lock_account_lifecycle_blocking(&self, name: &str) -> io::Result<File> {
+        let f = self.open_account_lifecycle_lock_file(name)?;
+        f.lock()?;
+        Ok(f)
+    }
+
+    /// Acquire the per-account lifecycle lock without waiting. `Ok(None)` means
+    /// another cooperating lifecycle operation for this account is already in
+    /// flight — the machine `account-action` maps this to `ACTION_IN_PROGRESS`
+    /// rather than blocking across a potentially long interactive login.
+    pub fn try_lock_account_lifecycle(&self, name: &str) -> io::Result<Option<File>> {
+        let f = self.open_account_lifecycle_lock_file(name)?;
+        match f.try_lock() {
+            Ok(()) => Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
+    // --- global authentication side-effect lock (macOS) ---
+    //
+    // `claude auth login` for a managed account snapshots the standard account's
+    // Keychain entries, logs in, then restores them (see
+    // identity::snapshot_side_effect_keychain). Two such logins running at once
+    // — or a managed login racing a `login default` that deliberately rewrites
+    // those same standard-account entries — can interleave their snapshot and
+    // restore and leave the standard account's Keychain holding the wrong token.
+    // This single process-wide lock serializes that critical section across ALL
+    // accounts.
+    //
+    // It is a NO-OP off macOS, where there is no shared-Keychain side effect, so
+    // ordinary concurrent logins to different accounts are not needlessly
+    // serialized there (preserving ordinary human CLI behavior). On macOS it is
+    // held only briefly, around the snapshot/login/restore bracket — never
+    // across routing work. Lock ordering: a lifecycle operation takes the
+    // per-account lock first (outermost) and this one only inside it, so the
+    // acquisition order is always account-lifecycle -> auth-side-effect, and the
+    // routing lock is disjoint (never held together with this one). No cycle, no
+    // deadlock.
+    pub fn auth_side_effect_lock_path(&self) -> PathBuf {
+        self.base_dir.join(".auth-side-effect.lock")
+    }
+
+    /// Acquire the global authentication side-effect lock, waiting without a
+    /// bound, on macOS; a no-op (`Ok(None)`) elsewhere. The returned guard holds
+    /// the lock across the snapshot/login/restore bracket and releases on drop.
+    pub fn lock_auth_side_effect_blocking(&self) -> io::Result<Option<File>> {
+        if !cfg!(target_os = "macos") {
+            return Ok(None);
+        }
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.auth_side_effect_lock_path())?;
+        f.lock()?;
+        Ok(Some(f))
+    }
 }
 
 #[cfg(test)]
@@ -1150,6 +1252,117 @@ mod tests {
             "original\n",
             "the store must be left intact when the temp create fails"
         );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    // --- per-account lifecycle lock (F3) ---
+
+    #[test]
+    fn the_account_lifecycle_lock_is_exclusive_per_name_and_releases_on_drop() {
+        let c = temp_config("lifecycle-exclusive");
+        let held = c
+            .try_lock_account_lifecycle("work")
+            .unwrap()
+            .expect("first acquirer wins");
+        // A second acquirer for the SAME account must be refused while it is held.
+        assert!(
+            c.try_lock_account_lifecycle("work").unwrap().is_none(),
+            "a held per-account lock must block a second acquirer of the same account"
+        );
+        drop(held);
+        assert!(
+            c.try_lock_account_lifecycle("work").unwrap().is_some(),
+            "the lock must be available again once the guard drops"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn different_accounts_do_not_share_a_lifecycle_lock() {
+        // Keyed by account name: an operation on `work` must never block one on
+        // `personal` — only same-account lifecycle operations serialize.
+        let c = temp_config("lifecycle-distinct");
+        let _work = c
+            .try_lock_account_lifecycle("work")
+            .unwrap()
+            .expect("acquire work");
+        assert!(
+            c.try_lock_account_lifecycle("personal").unwrap().is_some(),
+            "a different account's lifecycle lock must be free"
+        );
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn case_variant_spellings_share_a_lock_file_exactly_when_the_filesystem_collapses_them() {
+        // On a case-insensitive filesystem (Windows, default macOS) `Work` and
+        // `work` are the same account directory, so they must also map to the
+        // same lock file and cannot obtain independent locks. On a
+        // case-sensitive filesystem they are different accounts and independent
+        // locks are correct. Detect which this filesystem is (write one spelling,
+        // read the other) BEFORE taking any lock, then assert accordingly.
+        let c = temp_config("lifecycle-case");
+        let upper = c.account_lifecycle_lock_path("Work");
+        let lower = c.account_lifecycle_lock_path("work");
+        fs::write(&upper, b"first").unwrap();
+        let collapses = fs::read(&lower).map(|v| v == b"first").unwrap_or(false);
+
+        let held = c
+            .try_lock_account_lifecycle("Work")
+            .unwrap()
+            .expect("acquire Work");
+        let other = c.try_lock_account_lifecycle("work").unwrap();
+        if collapses {
+            assert!(
+                other.is_none(),
+                "case-variant spellings must share one lock on a case-insensitive fs"
+            );
+        } else {
+            assert!(
+                other.is_some(),
+                "distinct accounts on a case-sensitive fs correctly get independent locks"
+            );
+        }
+        drop(held);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    // --- global authentication side-effect lock (F3) ---
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_auth_side_effect_lock_is_a_noop_off_macos() {
+        // No shared-Keychain side effect off macOS, so the lock does not
+        // serialize anything — two acquisitions both succeed with no guard.
+        let c = temp_config("auth-noop");
+        assert!(c.lock_auth_side_effect_blocking().unwrap().is_none());
+        assert!(c.lock_auth_side_effect_blocking().unwrap().is_none());
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_auth_side_effect_lock_is_exclusive_and_releases_on_drop_on_macos() {
+        let c = temp_config("auth-macos");
+        let held = c
+            .lock_auth_side_effect_blocking()
+            .unwrap()
+            .expect("macOS returns a real guard");
+        // A second blocking acquirer would hang; prove exclusivity via the same
+        // underlying file through a bounded try on a fresh handle.
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(c.auth_side_effect_lock_path())
+            .unwrap();
+        assert!(
+            matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "a held auth-side-effect lock must block a second acquirer"
+        );
+        drop(held);
+        assert!(probe.try_lock().is_ok(), "released once the guard drops");
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 }

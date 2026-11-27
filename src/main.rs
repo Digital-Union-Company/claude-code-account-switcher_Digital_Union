@@ -475,14 +475,13 @@ fn main() {
     // effect. Its own handler refuses a missing store with a structured
     // `NOT_INITIALIZED` instead (docs/machine-api.md). Every other command,
     // including the read-only `--json` ones, still initializes as before.
-    // `account-action --probe` is capability discovery that must touch nothing
-    // (docs/machine-api.md), so it skips init too — unlike a create/reauth,
-    // which needs the accounts store and initializes as every other command does.
+    // `account-action` never initializes either (F4): capability discovery
+    // (`--probe`) must touch nothing, and a create/reauth must not let an
+    // invalid or refused request manufacture routing state as a side effect —
+    // it requires an already-initialized store and refuses an absent one with a
+    // structured `NOT_INITIALIZED` (docs/machine-api.md).
     let skip_init = matches!(cli.command, Some(Commands::Link { json: true, .. }))
-        || matches!(
-            cli.command,
-            Some(Commands::AccountAction { probe: true, .. })
-        );
+        || matches!(cli.command, Some(Commands::AccountAction { .. }));
     if !skip_init {
         match config.init() {
             Ok(()) => {}

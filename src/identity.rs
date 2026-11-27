@@ -267,6 +267,17 @@ pub fn find_duplicate_account(new_dir: &Path, known: &[(String, PathBuf)]) -> Op
     let AuditResult::Ok(profile) = audit_account(new_dir) else {
         return None;
     };
+    duplicate_from_profile(&profile, known)
+}
+
+/// Compare an already-audited live `profile` against the cached identity of
+/// every account in `known`, returning the first match's label. Split out of
+/// [`find_duplicate_account`] so a caller that has *already* audited the new
+/// account — the CM9 `account-action` contract audits exactly once, and reuses
+/// that single result both to decide whether authentication is authoritatively
+/// confirmed and to disclose a duplicate — never pays for a second network
+/// round-trip. Pure apart from reading the local caches in `known`.
+pub fn duplicate_from_profile(profile: &Profile, known: &[(String, PathBuf)]) -> Option<String> {
     known.iter().find_map(|(label, cache_path)| {
         let cached = read_cache_at(cache_path)?;
         identity_matches(profile.uuid.as_deref(), profile.email.as_deref(), &cached)

@@ -40,6 +40,14 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, force: bool, purge: bool
         }
     }
 
+    // Hold the per-account lifecycle lock across the removal so a concurrent
+    // machine `account-action` or human `login`/`add` of the same account
+    // cannot be mid-login, writing into the directory this is tearing down.
+    // Taken OUTSIDE the routing lock (lifecycle -> routing ordering, matching
+    // add/login/account-action), so there is no lock-ordering cycle. Best-effort
+    // on a rare lock-open I/O error.
+    let _lifecycle = config.lock_account_lifecycle_blocking(name).ok();
+
     // Clearing the default (if it names this account), dropping its links, and
     // removing the account directory are ONE transaction under the routing
     // lock. Otherwise a concurrent machine `link --json` could validate this
