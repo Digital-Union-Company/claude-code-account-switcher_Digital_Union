@@ -700,7 +700,16 @@ impl AppConfig {
     // routing lock is disjoint (never held together with this one). No cycle, no
     // deadlock.
     pub fn auth_side_effect_lock_path(&self) -> PathBuf {
-        self.base_dir.join(".auth-side-effect.lock")
+        // Store-INDEPENDENT: the macOS Keychain this guards is per-USER and
+        // shared across every provider store, so the lock must NOT live under
+        // self.base_dir — two cooperating processes with different
+        // CLAUDE_SWITCH_HOME overrides must still serialize on it. Anchor it to a
+        // single per-user dotfile in the home directory. Fall back to the store
+        // only if the home cannot be resolved (then it is per-store, which is
+        // still correct for the default single-store configuration).
+        dirs::home_dir()
+            .map(|h| h.join(".claude-switch-auth-side-effect.lock"))
+            .unwrap_or_else(|| self.base_dir.join(".auth-side-effect.lock"))
     }
 
     /// Acquire the global authentication side-effect lock, waiting without a
@@ -1340,10 +1349,35 @@ mod tests {
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
+    #[test]
+    fn the_auth_side_effect_lock_is_store_independent() {
+        // F3: the macOS Keychain this guards is per-USER and shared across
+        // provider stores, so two different CLAUDE_SWITCH_HOME overrides must
+        // resolve to the SAME auth lock and never under either store. (Path
+        // computation only — no locking — so it runs on every platform. Requires
+        // a resolvable home, which CI always has.)
+        if dirs::home_dir().is_some() {
+            let a = AppConfig {
+                base_dir: std::env::temp_dir().join("cc-auth-store-a"),
+            };
+            let b = AppConfig {
+                base_dir: std::env::temp_dir().join("cc-auth-store-b"),
+            };
+            assert_eq!(
+                a.auth_side_effect_lock_path(),
+                b.auth_side_effect_lock_path(),
+                "different stores must share one per-user auth lock"
+            );
+            assert!(!a.auth_side_effect_lock_path().starts_with(&a.base_dir));
+            assert!(!b.auth_side_effect_lock_path().starts_with(&b.base_dir));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn the_auth_side_effect_lock_is_exclusive_and_releases_on_drop_on_macos() {
         let c = temp_config("auth-macos");
+        let lock_path = c.auth_side_effect_lock_path();
         let held = c
             .lock_auth_side_effect_blocking()
             .unwrap()
@@ -1355,7 +1389,7 @@ mod tests {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(c.auth_side_effect_lock_path())
+            .open(&lock_path)
             .unwrap();
         assert!(
             matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
@@ -1363,6 +1397,10 @@ mod tests {
         );
         drop(held);
         assert!(probe.try_lock().is_ok(), "released once the guard drops");
+        drop(probe);
+        // The lock lives in the per-user home (store-independent), so remove the
+        // file rather than relying on the per-store temp cleanup.
+        let _ = fs::remove_file(&lock_path);
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 }

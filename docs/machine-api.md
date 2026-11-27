@@ -582,13 +582,18 @@ creating routing state as a side effect of a GUI-triggered action.
 It must be an **absolute** path, naming a file in an **existing, real directory**
 that is **outside** the claude-acc store and the standard Claude configuration,
 and it **must not already exist**. The provider proves the directory is writable
-up front, then publishes the single document atomically (unique temp + rename)
-**without replacing** any file that appears at the destination. A pre-existing or
-stale file is therefore never mistaken for this action's outcome. One residual
-race remains and is disclosed honestly: there is no portable atomic no-clobber
-rename, so a destination created in the narrow window between the final
-existence re-check and the rename could still be replaced — supply a fresh,
-unique destination per invocation.
+up front, writes the complete document to an exclusively created, fsynced temp,
+then publishes by **hard-linking** that temp onto the destination.
+`link(2)`/`CreateHardLinkW` is a genuine **atomic no-replace** primitive on both
+platforms: it fails (`AlreadyExists`) if anything is already at the destination
+and never overwrites it, so a pre-existing or stale file is never clobbered or
+mistaken for this action's outcome. The provider **fails closed** on any publish
+error — including a filesystem that does not support hard links — and never falls
+back to an overwriting rename. The residual limitation, disclosed honestly: this
+does not defend against a hostile change of the destination's *ancestry* (a
+parent directory swapped between validation and publish), so callers must use a
+**fresh, private, caller-owned result directory per invocation** on a filesystem
+that supports hard links (any ordinary local user directory).
 
 The single outcome document is written to `--result-file` as the same envelope
 shape every `--json` command uses. A **success** (`ok:true`) means the action
@@ -645,7 +650,10 @@ account), `ACCOUNT_NOT_FOUND` (reauth target absent), `PROFILE_NOT_CONTAINED`
 (the target is not a real account directory inside the managed-account root — a
 symlink/junction/reparse redirect), `SEED_NOT_SUPPORTED`, `NOT_INITIALIZED`,
 `ACTION_IN_PROGRESS` (another lifecycle operation for this account is already
-running), `ACTION_INVALID`, `IO_ERROR`.
+running), `AUTH_GUARD_UNAVAILABLE` (a required guard around the login could not
+be acquired, so the login was **not attempted** — fail-closed; its `details`
+carry `account_created` so a partial create reservation is reported honestly),
+`ACTION_INVALID`, `IO_ERROR`.
 
 Errors about the **invocation shape** (`JSON_REQUIRED`, `INVALID_ARGUMENTS`) and
 about the **result channel itself** (`RESULT_FILE_NOT_ABSOLUTE`,
@@ -684,9 +692,15 @@ action **already ran** and may have changed account state, so it is an
   serializes that snapshot/restore bracket across **all** cooperating logins
   (including `login default`, which deliberately rewrites those entries), so two
   logins cannot interleave and leave the standard account holding the wrong
-  token. It is a no-op off macOS and is held only briefly around the login
-  bracket. Lock ordering is always per-account → auth-side-effect, and the
-  routing lock is disjoint — no deadlock.
+  token. Because that Keychain is **per-user** and shared across every provider
+  store, this lock is **store-independent** (anchored per-user, not under
+  `CLAUDE_SWITCH_HOME`), so two cooperating processes with **different store
+  overrides** still serialize on it. It is a no-op off macOS and is held only
+  briefly around the login bracket. Lock ordering is always per-account →
+  auth-side-effect, and the routing lock is disjoint — no deadlock. A guard that
+  cannot be acquired **fails closed** (`AUTH_GUARD_UNAVAILABLE` for a machine
+  action; a non-zero refusal for a human command) — the login is never run
+  unguarded.
 - The **global routing lock** is held **only** for the brief name reservation on
   `create`, **never** across the interactive login.
 - These locks bind only **cooperating current binaries**. An older claude-acc, a

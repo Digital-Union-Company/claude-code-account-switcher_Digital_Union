@@ -37,8 +37,14 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
 
     // Hold the per-account lifecycle lock across this re-login so a concurrent
     // machine `account-action` or human `remove` of the same account cannot
-    // overlap it. Best-effort on a rare lock-open I/O error.
-    let _lifecycle = config.lock_account_lifecycle_blocking(name).ok();
+    // overlap it. Fail closed on a genuine lock-acquisition error.
+    let _lifecycle = match config.lock_account_lifecycle_blocking(name) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
 
     i18n.print(Msg::LoginStart(name.to_string()));
     // See identity::snapshot_side_effect_keychain: `claude auth login` can
@@ -47,7 +53,13 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
     // auth-side-effect lock (macOS only; a no-op elsewhere) serializes the
     // snapshot/restore bracket against every other cooperating login.
     let code = {
-        let _auth = config.lock_auth_side_effect_blocking().ok().flatten();
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
         let keychain_snapshot = identity::snapshot_side_effect_keychain();
         let code = super::spawn_claude(build_login_process(config, Some(&acc_dir)), i18n);
         identity::restore_side_effect_keychain(keychain_snapshot);
@@ -75,10 +87,22 @@ fn login_default(config: &AppConfig, i18n: &I18n) {
     // snapshot/restore bracket would otherwise race this and either clobber the
     // new standard-account token or be clobbered by it. Also holds the "default"
     // lifecycle lock so two standard-account logins do not overlap.
-    let _lifecycle = config.lock_account_lifecycle_blocking("default").ok();
+    let _lifecycle = match config.lock_account_lifecycle_blocking("default") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
     i18n.print(Msg::LoginStart("default".to_string()));
     let code = {
-        let _auth = config.lock_auth_side_effect_blocking().ok().flatten();
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
         super::spawn_claude(build_login_process(config, None), i18n)
     };
     if code != 0 {

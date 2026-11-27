@@ -32,9 +32,16 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, seed_from_default: bool)
 
     // Hold the per-account lifecycle lock for the whole add, so a concurrent
     // machine `account-action` or human `remove`/`login` of the SAME account
-    // cannot overlap this create+login. Different accounts are unaffected. A
-    // rare lock-open I/O error degrades to best-effort rather than aborting.
-    let _lifecycle = config.lock_account_lifecycle_blocking(name).ok();
+    // cannot overlap this create+login. Different accounts are unaffected. Fail
+    // closed on a genuine lock-acquisition error rather than proceeding
+    // unguarded (OS error on stderr — no translation applies).
+    let _lifecycle = match config.lock_account_lifecycle_blocking(name) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let acc_dir = config.account_path(name);
     // Reserving the account name — the existence check plus the directory
@@ -85,7 +92,13 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, seed_from_default: bool)
     // bracket against every other cooperating login so two cannot interleave
     // their snapshot/restore and clobber the standard account's token.
     let code = {
-        let _auth = config.lock_auth_side_effect_blocking().ok().flatten();
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
         let keychain_snapshot = identity::snapshot_side_effect_keychain();
         let code = super::spawn_claude(build_login_process(config, &acc_dir), i18n);
         identity::restore_side_effect_keychain(keychain_snapshot);

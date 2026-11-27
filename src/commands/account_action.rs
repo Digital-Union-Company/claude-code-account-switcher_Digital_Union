@@ -110,6 +110,18 @@ pub enum LoginExit {
     SpawnFailed,
 }
 
+/// A required guard around the interactive login could not be established, so
+/// the login was NOT attempted — fail closed (F3). Distinct from a login that
+/// ran and exited: here no `claude auth login` child, no Keychain snapshot and
+/// no restore happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginGuardError {
+    /// The macOS authentication side-effect lock (which serializes the shared
+    /// Keychain snapshot/restore across all cooperating logins) could not be
+    /// acquired. Carries the OS error for the report.
+    AuthLockUnavailable(String),
+}
+
 /// Whether the account's authentication was *authoritatively* verified after
 /// the login (a live token + profile audit), or could not be — the distinction
 /// F2 turns on. `Unconfirmed` is not a failure; it is "the login completed but
@@ -200,6 +212,14 @@ pub enum ActionError {
     ProfileNotContained(String),
     /// Another lifecycle operation for this account is already in flight.
     ActionInProgress(String),
+    /// A required guard around the login could not be acquired, so the login was
+    /// not attempted (fail-closed). `created` preserves the partial reservation
+    /// honestly — on a `create`, the account directory may already exist.
+    AuthGuardUnavailable {
+        account: String,
+        created: bool,
+        detail: String,
+    },
     Io(String),
 }
 
@@ -213,6 +233,7 @@ impl ActionError {
             ActionError::AccountNotFound(_) => "ACCOUNT_NOT_FOUND",
             ActionError::ProfileNotContained(_) => "PROFILE_NOT_CONTAINED",
             ActionError::ActionInProgress(_) => "ACTION_IN_PROGRESS",
+            ActionError::AuthGuardUnavailable { .. } => "AUTH_GUARD_UNAVAILABLE",
             ActionError::Io(_) => "IO_ERROR",
         }
     }
@@ -246,6 +267,11 @@ impl ActionError {
             ActionError::ActionInProgress(n) => {
                 format!("another account action for '{n}' is already in progress")
             }
+            ActionError::AuthGuardUnavailable { detail, .. } => {
+                format!(
+                    "a required authentication guard could not be acquired, so the login was not attempted (fail-closed): {detail}"
+                )
+            }
             ActionError::Io(e) => e.clone(),
         }
     }
@@ -258,6 +284,11 @@ impl ActionError {
             | ActionError::AccountNotFound(n)
             | ActionError::ProfileNotContained(n)
             | ActionError::ActionInProgress(n) => json!({ "account": n }),
+            // Preserve the partial reservation honestly: on a create the account
+            // directory may already exist even though no login ran.
+            ActionError::AuthGuardUnavailable {
+                account, created, ..
+            } => json!({ "account": account, "account_created": created }),
             ActionError::NameInvalid | ActionError::Io(_) => json!({}),
         }
     }
@@ -359,7 +390,7 @@ pub fn perform_action(
     action: Action,
     name: &str,
     seed_from_default: bool,
-    run_login: &dyn Fn(&Path) -> LoginExit,
+    run_login: &dyn Fn(&Path) -> Result<LoginExit, LoginGuardError>,
 ) -> Result<ActionReport, ActionError> {
     if is_reserved_name(name) {
         return Err(ActionError::ReservedName(name.to_string()));
@@ -425,7 +456,19 @@ pub fn perform_action(
         }
     };
 
-    let exit = run_login(&acc_dir);
+    let exit = match run_login(&acc_dir) {
+        Ok(exit) => exit,
+        Err(LoginGuardError::AuthLockUnavailable(detail)) => {
+            // Fail closed: no login was attempted (no spawn, no Keychain
+            // snapshot/restore). Report honestly, preserving any partial create
+            // reservation via `created`.
+            return Err(ActionError::AuthGuardUnavailable {
+                account: name.to_string(),
+                created,
+                detail,
+            });
+        }
+    };
     let child_exit_code = match exit {
         LoginExit::Exited(code) => Some(code),
         LoginExit::SpawnFailed => None,
@@ -778,13 +821,22 @@ fn prepare_result_channel(
     })
 }
 
-/// Publish `doc` to the channel's destination atomically, without replacing an
-/// existing destination (F1). Writes a uniquely named, exclusively created
-/// sibling temp, fsyncs it, re-checks the destination is still absent, then
-/// renames. Cleans up only its own temp. A residual filesystem race remains:
-/// std has no portable atomic no-clobber rename, so a destination created in the
-/// narrow window between the re-check and the rename could be replaced — the
-/// re-check narrows but cannot close it (documented in docs/machine-api.md).
+/// Publish `doc` to the channel's destination **atomically, without ever
+/// replacing** an existing destination (F1). Writes the COMPLETE document to a
+/// uniquely named, exclusively created sibling temp (fsynced and closed), then
+/// hard-links it onto the destination.
+///
+/// `std::fs::hard_link` (`link(2)` / `CreateHardLinkW`) is a genuine **atomic
+/// no-replace** primitive on both platforms: it fails with `AlreadyExists` if
+/// anything is already at the destination and never overwrites it, closing the
+/// check-then-rename race entirely. We **fail closed** on any link error —
+/// including a filesystem that does not support hard links — and never fall back
+/// to an overwriting rename.
+///
+/// Honest residual: this does not defend against a hostile change of the
+/// destination's *ancestry* (a parent directory swapped under us between
+/// validation and publish). Callers must use a fresh, private, caller-owned
+/// result directory per invocation.
 fn publish_result(channel: &ResultChannel, doc: &Value) -> io::Result<()> {
     let mut serialized = serde_json::to_string_pretty(doc).map_err(io::Error::other)?;
     serialized.push('\n');
@@ -795,7 +847,9 @@ fn publish_result(channel: &ResultChannel, doc: &Value) -> io::Result<()> {
         PUBLISH_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
 
-    // Exclusive create: never adopt a temp we did not make.
+    // Exclusive create: never adopt a temp we did not make. Write the whole
+    // document, flush and fsync, then close, so the content is complete before
+    // the destination link can ever point at it.
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -810,27 +864,12 @@ fn publish_result(channel: &ResultChannel, doc: &Value) -> io::Result<()> {
         return Err(e);
     }
 
-    // Re-check the destination is still absent right before publishing.
-    match fs::symlink_metadata(&channel.dest) {
-        Ok(_) => {
-            let _ = fs::remove_file(&tmp);
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "result destination appeared before publish",
-            ));
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-    }
-
-    if let Err(e) = fs::rename(&tmp, &channel.dest) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    // Atomic no-replace publish. On AlreadyExists the destination is left
+    // byte-for-byte untouched; on any other error we fail closed (no rename
+    // fallback). Either way we clean up only our own temp.
+    let published = fs::hard_link(&tmp, &channel.dest);
+    let _ = fs::remove_file(&tmp);
+    published
 }
 
 /// Whether the provider store has actually been initialized. A lifecycle action
@@ -849,8 +888,17 @@ fn store_initialized(config: &AppConfig) -> bool {
 /// `ClaudeProcess` substrate, so exe resolution, structured argv and the
 /// auth-env scrub are identical to `add`/`login`. The terminal is inherited —
 /// the caller is expected to have hosted one.
-fn run_login_production(config: &AppConfig, acc_dir: &Path) -> LoginExit {
-    let _auth = config.lock_auth_side_effect_blocking().ok().flatten();
+fn run_login_production(
+    config: &AppConfig,
+    acc_dir: &Path,
+) -> Result<LoginExit, LoginGuardError> {
+    // Acquire the guard FAIL-CLOSED. `Ok(None)` is the intended no-op off macOS
+    // (no shared-Keychain side effect there); only a genuine acquisition `Err`
+    // is a failure, and then we must NOT snapshot, log in, or restore.
+    let _auth = match config.lock_auth_side_effect_blocking() {
+        Ok(guard) => guard,
+        Err(e) => return Err(LoginGuardError::AuthLockUnavailable(e.to_string())),
+    };
     let keychain = identity::snapshot_side_effect_keychain();
     let process = ClaudeProcess::new(
         ["auth", "login"],
@@ -860,10 +908,10 @@ fn run_login_production(config: &AppConfig, acc_dir: &Path) -> LoginExit {
     );
     let result = process.spawn();
     identity::restore_side_effect_keychain(keychain);
-    match result {
+    Ok(match result {
         Ok(code) => LoginExit::Exited(code),
         Err(_) => LoginExit::SpawnFailed,
-    }
+    })
 }
 
 /// Build the outcome (or operational-refusal) document for a create/reauth,
@@ -1031,14 +1079,14 @@ mod tests {
     fn fake_login_success(
         uuid: &'static str,
         email: Option<&'static str>,
-    ) -> impl Fn(&Path) -> LoginExit {
+    ) -> impl Fn(&Path) -> Result<LoginExit, LoginGuardError> {
         move |acc_dir: &Path| {
             let oauth = match email {
                 Some(e) => json!({"oauthAccount": {"accountUuid": uuid, "emailAddress": e}}),
                 None => json!({"oauthAccount": {"accountUuid": uuid}}),
             };
             fs::write(acc_dir.join(".claude.json"), oauth.to_string()).unwrap();
-            LoginExit::Exited(0)
+            Ok(LoginExit::Exited(0))
         }
     }
 
@@ -1176,7 +1224,7 @@ mod tests {
         // Defined behavior: account created, login exited non-zero -> the dir
         // stays (no destructive rollback), login_failed, no pin.
         let c = scratch("create-authfail");
-        let login = |_acc: &Path| LoginExit::Exited(1);
+        let login = |_acc: &Path| Ok(LoginExit::Exited(1));
         let report = perform_action(&c, Action::Create, "halfborn", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::LoginFailed);
         assert!(report.created);
@@ -1193,7 +1241,7 @@ mod tests {
     #[test]
     fn create_success_but_no_local_identity_is_login_completed_no_identity() {
         let c = scratch("create-noident");
-        let login = |_acc: &Path| LoginExit::Exited(0); // exits 0 but writes no identity
+        let login = |_acc: &Path| Ok(LoginExit::Exited(0)); // exits 0 but writes no identity
         let report = perform_action(&c, Action::Create, "ghost", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::LoginCompletedNoIdentity);
         assert!(!report.pinned);
@@ -1207,7 +1255,7 @@ mod tests {
     #[test]
     fn create_spawn_failure_is_reported_as_spawn_failed() {
         let c = scratch("create-spawnfail");
-        let login = |_acc: &Path| LoginExit::SpawnFailed;
+        let login = |_acc: &Path| Ok(LoginExit::SpawnFailed);
         let report = perform_action(&c, Action::Create, "nostart", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::SpawnFailed);
         assert_eq!(report.child_exit_code, None);
@@ -1272,7 +1320,7 @@ mod tests {
         .unwrap();
 
         // A login that changes nothing and exits 0.
-        let login = |_acc: &Path| LoginExit::Exited(0);
+        let login = |_acc: &Path| Ok(LoginExit::Exited(0));
         let report = perform_action(&c, Action::Reauth, "stale", false, &login).unwrap();
 
         assert_eq!(report.outcome, Outcome::LoginCompleted);
@@ -1377,7 +1425,7 @@ mod tests {
             let inner = inner.clone();
             move |acc_dir: &Path| {
                 let nested = perform_action(&inner, Action::Reauth, "busy", false, &|_: &Path| {
-                    LoginExit::Exited(0)
+                    Ok(LoginExit::Exited(0))
                 });
                 assert_eq!(
                     nested.unwrap_err(),
@@ -1389,7 +1437,7 @@ mod tests {
                     json!({"oauthAccount": {"accountUuid": "u-busy"}}).to_string(),
                 )
                 .unwrap();
-                LoginExit::Exited(0)
+                Ok(LoginExit::Exited(0))
             }
         };
         let report = perform_action(&c, Action::Create, acc, false, &login).unwrap();
@@ -1410,7 +1458,7 @@ mod tests {
                     json!({"oauthAccount": {"accountUuid": "u-other"}}).to_string(),
                 )
                 .unwrap();
-                LoginExit::Exited(0)
+                Ok(LoginExit::Exited(0))
             });
             assert!(
                 other.is_ok(),
@@ -1421,7 +1469,7 @@ mod tests {
                 json!({"oauthAccount": {"accountUuid": "u-main"}}).to_string(),
             )
             .unwrap();
-            LoginExit::Exited(0)
+            Ok(LoginExit::Exited(0))
         };
         fs::create_dir_all(c.account_path("other")).unwrap();
         let report = perform_action(&c, Action::Create, "main", false, &login).unwrap();
@@ -1473,7 +1521,7 @@ mod tests {
         // acquire -> drop -> reacquire pattern (no interleaved failed try).
         let c = scratch("lock-release");
         let refused = perform_action(&c, Action::Reauth, "later", false, &|_: &Path| {
-            LoginExit::Exited(0)
+            Ok(LoginExit::Exited(0))
         });
         assert_eq!(
             refused.unwrap_err(),
@@ -1507,10 +1555,41 @@ mod tests {
                 json!({"oauthAccount": {"accountUuid": "u-rf"}}).to_string(),
             )
             .unwrap();
-            LoginExit::Exited(0)
+            Ok(LoginExit::Exited(0))
         };
         let report = perform_action(&c, Action::Create, "rf", false, &login).unwrap();
         assert_eq!(report.outcome, Outcome::LoginCompleted);
+        let _ = fs::remove_dir_all(&c.base_dir);
+    }
+
+    #[test]
+    fn a_login_guard_failure_refuses_fail_closed_and_preserves_the_reservation() {
+        // F3: if a required guard around the login cannot be acquired, NO login
+        // is attempted — a structured operational refusal, never a silent
+        // continue and never an outcome. The create reservation is preserved
+        // honestly (the directory exists, no login ran).
+        let c = scratch("guard-fail");
+        let login =
+            |_: &Path| Err(LoginGuardError::AuthLockUnavailable("simulated".to_string()));
+        let err = perform_action(&c, Action::Create, "half", false, &login).unwrap_err();
+        assert_eq!(
+            err,
+            ActionError::AuthGuardUnavailable {
+                account: "half".to_string(),
+                created: true,
+                detail: "simulated".to_string(),
+            }
+        );
+        assert!(c.account_path("half").is_dir(), "reservation preserved");
+        assert!(
+            !c.account_path("half").join(".claude.json").exists(),
+            "no login ran"
+        );
+        let doc = error_to_doc(&err);
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["error"]["code"], "AUTH_GUARD_UNAVAILABLE");
+        assert_eq!(doc["error"]["details"]["account"], "half");
+        assert_eq!(doc["error"]["details"]["account_created"], true);
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 
@@ -1616,7 +1695,7 @@ mod tests {
                     .to_string(),
             )
             .unwrap();
-            LoginExit::Exited(0)
+            Ok(LoginExit::Exited(0))
         };
         let report = perform_action(&c, Action::Create, "sec", false, &login).unwrap();
         let doc = report_to_doc(&report);
@@ -1739,20 +1818,23 @@ mod tests {
     }
 
     #[test]
-    fn publish_refuses_a_destination_that_appeared_after_prepare() {
-        // Models the narrow race: the destination is created between prepare and
-        // publish. Publish must refuse rather than clobber it, and clean its temp.
+    fn publish_atomically_refuses_a_destination_introduced_before_it_and_leaves_it_byte_identical() {
+        // F1 deterministic regression: a destination introduced immediately
+        // before publication must remain byte-for-byte intact. The atomic
+        // no-replace hard-link fails closed (AlreadyExists) and never overwrites
+        // — no check-then-rename window exists anymore.
         let c = scratch("rc-race");
         let dest = result_path("rc-race");
         let channel = prepare_result_channel(&c, &dest).unwrap();
-        fs::write(&dest, "someone-else").unwrap();
+        let prior = b"PRIOR-RESULT-\x00\x01-DO-NOT-CLOBBER\n".to_vec();
+        fs::write(&dest, &prior).unwrap();
         let doc = probe_doc();
         let err = publish_result(&channel, &doc).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
-            fs::read_to_string(&dest).unwrap(),
-            "someone-else",
-            "the destination that appeared must not be clobbered"
+            fs::read(&dest).unwrap(),
+            prior,
+            "the destination that was present must be left byte-identical"
         );
         let leftovers: Vec<_> = fs::read_dir(dest.parent().unwrap())
             .unwrap()
