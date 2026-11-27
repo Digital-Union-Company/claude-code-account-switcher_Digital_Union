@@ -69,6 +69,20 @@ fn write_file_atomic_seq(path: &Path, content: &str, seq: u64) -> io::Result<()>
     result
 }
 
+/// Open `path` (creating it if absent) and take a blocking exclusive advisory
+/// lock on it. Shared by the auth-side-effect lock and, with an isolated path,
+/// its test — so the test never has to touch the real shared per-user lock.
+fn open_and_lock_blocking(path: &Path) -> io::Result<File> {
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    f.lock()?;
+    Ok(f)
+}
+
 /// Account names: ASCII letters, digits, hyphens, underscores. Rejects path
 /// separators, regex metacharacters, whitespace, and unicode — anything
 /// unsafe in a filesystem path or shell expansion.
@@ -699,34 +713,35 @@ impl AppConfig {
     // acquisition order is always account-lifecycle -> auth-side-effect, and the
     // routing lock is disjoint (never held together with this one). No cycle, no
     // deadlock.
-    pub fn auth_side_effect_lock_path(&self) -> PathBuf {
-        // Store-INDEPENDENT: the macOS Keychain this guards is per-USER and
-        // shared across every provider store, so the lock must NOT live under
-        // self.base_dir — two cooperating processes with different
-        // CLAUDE_SWITCH_HOME overrides must still serialize on it. Anchor it to a
-        // single per-user dotfile in the home directory. Fall back to the store
-        // only if the home cannot be resolved (then it is per-store, which is
-        // still correct for the default single-store configuration).
-        dirs::home_dir()
-            .map(|h| h.join(".claude-switch-auth-side-effect.lock"))
-            .unwrap_or_else(|| self.base_dir.join(".auth-side-effect.lock"))
+    pub fn auth_side_effect_lock_path(&self) -> Option<PathBuf> {
+        // Store-INDEPENDENT and per-user: the macOS Keychain this guards is
+        // per-user and shared across every provider store, so the lock is
+        // anchored to a single per-user home dotfile and is the SAME for every
+        // CLAUDE_SWITCH_HOME override. There is deliberately **no** store-dependent
+        // fallback: if the home cannot be resolved this returns `None` and the
+        // caller FAILS CLOSED, because a per-store fallback would let two
+        // different overrides obtain independent auth locks and silently defeat
+        // the shared-Keychain protection.
+        dirs::home_dir().map(|h| h.join(".claude-switch-auth-side-effect.lock"))
     }
 
     /// Acquire the global authentication side-effect lock, waiting without a
-    /// bound, on macOS; a no-op (`Ok(None)`) elsewhere. The returned guard holds
-    /// the lock across the snapshot/login/restore bracket and releases on drop.
+    /// bound, on macOS; a no-op (`Ok(None)`) elsewhere. On macOS, if the per-user
+    /// home cannot be resolved there is **no** store-dependent fallback — it
+    /// returns an error so the caller fails closed (never an independent
+    /// per-store lock). The returned guard holds the lock across the
+    /// snapshot/login/restore bracket and releases on drop.
     pub fn lock_auth_side_effect_blocking(&self) -> io::Result<Option<File>> {
         if !cfg!(target_os = "macos") {
             return Ok(None);
         }
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.auth_side_effect_lock_path())?;
-        f.lock()?;
-        Ok(Some(f))
+        let path = self.auth_side_effect_lock_path().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "cannot resolve the per-user home for the authentication side-effect lock; refusing a store-dependent fallback",
+            )
+        })?;
+        Ok(Some(open_and_lock_blocking(&path)?))
     }
 }
 
@@ -1363,44 +1378,39 @@ mod tests {
             let b = AppConfig {
                 base_dir: std::env::temp_dir().join("cc-auth-store-b"),
             };
-            assert_eq!(
-                a.auth_side_effect_lock_path(),
-                b.auth_side_effect_lock_path(),
-                "different stores must share one per-user auth lock"
-            );
-            assert!(!a.auth_side_effect_lock_path().starts_with(&a.base_dir));
-            assert!(!b.auth_side_effect_lock_path().starts_with(&b.base_dir));
+            let pa = a.auth_side_effect_lock_path().expect("home resolves in CI");
+            let pb = b.auth_side_effect_lock_path().expect("home resolves in CI");
+            assert_eq!(pa, pb, "different stores must share one per-user auth lock");
+            // No store-dependent fallback: the path is under neither store.
+            assert!(!pa.starts_with(&a.base_dir));
+            assert!(!pb.starts_with(&b.base_dir));
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn the_auth_side_effect_lock_is_exclusive_and_releases_on_drop_on_macos() {
-        let c = temp_config("auth-macos");
-        let lock_path = c.auth_side_effect_lock_path();
-        let held = c
-            .lock_auth_side_effect_blocking()
-            .unwrap()
-            .expect("macOS returns a real guard");
-        // A second blocking acquirer would hang; prove exclusivity via the same
-        // underlying file through a bounded try on a fresh handle.
+    fn the_auth_side_effect_lock_mechanism_is_exclusive_and_releases_on_drop() {
+        // Exercise the exact blocking-lock mechanism the auth-side-effect lock
+        // uses (`open_and_lock_blocking`) on an ISOLATED scratch path — never the
+        // real shared per-user auth lock, which must not be acquired, replaced or
+        // deleted by a test. (Path-level store-independence is covered above.)
+        let c = temp_config("auth-mechanism");
+        let iso = c.base_dir.join("iso-auth-side-effect.lock");
+        let held = open_and_lock_blocking(&iso).unwrap();
         let probe = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&lock_path)
+            .open(&iso)
             .unwrap();
         assert!(
             matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
-            "a held auth-side-effect lock must block a second acquirer"
+            "a held lock must block a second acquirer"
         );
         drop(held);
         assert!(probe.try_lock().is_ok(), "released once the guard drops");
         drop(probe);
-        // The lock lives in the per-user home (store-independent), so remove the
-        // file rather than relying on the per-store temp cleanup.
-        let _ = fs::remove_file(&lock_path);
+        // The isolated lock file is removed with the scratch dir.
         let _ = fs::remove_dir_all(&c.base_dir);
     }
 }

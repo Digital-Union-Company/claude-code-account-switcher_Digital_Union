@@ -73,3 +73,72 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/windows_paths.ps1 -Binary ./target/release/claude-acc.exe
+
+  # Build and publish the Windows candidate ONLY for a pull request, from the
+  # EXACT PR head (not the synthetic refs/pull/N/merge commit), so the
+  # artifact's provenance is unambiguous. This is additive: it does not alter
+  # the `rust` matrix above (which keeps testing the merge commit as a required
+  # check), keeps read-only permissions, uses no secrets, and is not
+  # pull_request_target.
+  candidate:
+    name: windows candidate (exact PR head)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the exact PR head (not the merge commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: stable
+
+      - name: Build release candidate (clean, uncached)
+        run: cargo build --release
+
+      - name: Collect checksum and non-secret provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = 'target/release/claude-acc.exe'
+          if (-not (Test-Path $bin)) { throw "candidate binary missing: $bin" }
+          New-Item -ItemType Directory -Force candidate | Out-Null
+          Copy-Item $bin candidate/claude-acc.exe
+          $sha = (Get-FileHash candidate/claude-acc.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Path candidate/claude-acc.exe.sha256 -Value "$sha  claude-acc.exe"
+          $checkout = (git rev-parse HEAD)
+          $tree = (git rev-parse 'HEAD^{tree}')
+          $prov = [ordered]@{
+            artifact             = 'claude-acc.exe'
+            sha256               = $sha
+            size_bytes           = (Get-Item candidate/claude-acc.exe).Length
+            pr_head_commit       = '${{ github.event.pull_request.head.sha }}'
+            checkout_commit      = $checkout
+            tree                 = $tree
+            pr_number            = '${{ github.event.pull_request.number }}'
+            workflow_run_id      = '${{ github.run_id }}'
+            workflow_run_attempt = '${{ github.run_attempt }}'
+            target               = 'x86_64-pc-windows-msvc'
+            runner_os            = '${{ runner.os }}'
+            rustc_version        = (rustc --version)
+          }
+          $prov | ConvertTo-Json | Set-Content -Path candidate/provenance.json
+          if ($checkout -ne '${{ github.event.pull_request.head.sha }}') {
+            throw "checkout $checkout is not the PR head ${{ github.event.pull_request.head.sha }}"
+          }
+          Write-Host "candidate sha256=$sha size=$((Get-Item candidate/claude-acc.exe).Length) head=$checkout"
+
+      - name: Upload the candidate (exe + checksum + provenance only)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: claude-acc-windows-candidate
+          path: |
+            candidate/claude-acc.exe
+            candidate/claude-acc.exe.sha256
+            candidate/provenance.json
+          if-no-files-found: error
+          retention-days: 7
