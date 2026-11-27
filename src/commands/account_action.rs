@@ -888,10 +888,7 @@ fn store_initialized(config: &AppConfig) -> bool {
 /// `ClaudeProcess` substrate, so exe resolution, structured argv and the
 /// auth-env scrub are identical to `add`/`login`. The terminal is inherited —
 /// the caller is expected to have hosted one.
-fn run_login_production(
-    config: &AppConfig,
-    acc_dir: &Path,
-) -> Result<LoginExit, LoginGuardError> {
+fn run_login_production(config: &AppConfig, acc_dir: &Path) -> Result<LoginExit, LoginGuardError> {
     // Acquire the guard FAIL-CLOSED. `Ok(None)` is the intended no-op off macOS
     // (no shared-Keychain side effect there); only a genuine acquisition `Err`
     // is a failure, and then we must NOT snapshot, log in, or restore.
@@ -1569,8 +1566,11 @@ mod tests {
         // continue and never an outcome. The create reservation is preserved
         // honestly (the directory exists, no login ran).
         let c = scratch("guard-fail");
-        let login =
-            |_: &Path| Err(LoginGuardError::AuthLockUnavailable("simulated".to_string()));
+        let login = |_: &Path| {
+            Err(LoginGuardError::AuthLockUnavailable(
+                "simulated".to_string(),
+            ))
+        };
         let err = perform_action(&c, Action::Create, "half", false, &login).unwrap_err();
         assert_eq!(
             err,
@@ -1818,7 +1818,8 @@ mod tests {
     }
 
     #[test]
-    fn publish_atomically_refuses_a_destination_introduced_before_it_and_leaves_it_byte_identical() {
+    fn publish_atomically_refuses_a_destination_introduced_before_it_and_leaves_it_byte_identical()
+    {
         // F1 deterministic regression: a destination introduced immediately
         // before publication must remain byte-for-byte intact. The atomic
         // no-replace hard-link fails closed (AlreadyExists) and never overwrites
