@@ -68,6 +68,7 @@ _claude_acc_completion() {
         'whoami:Print active account email'
         'clone-settings:Copy ~/.claude/ config into account'
         'import:Import an existing Claude config dir (no re-login)'
+        'account-action:Machine-only account create/reauth (GUI contract)'
     )
 
     local cmd="${words[2]}"
@@ -103,6 +104,23 @@ _claude_acc_completion() {
             [[ "$cmd" == status ]] && _files -/
             return
             ;;
+        --account)
+            # `account-action --account` takes an existing/new managed account.
+            [[ "$cmd" == account-action ]] && _claude_acc_accounts
+            return
+            ;;
+        --action)
+            if [[ "$cmd" == account-action ]]; then
+                local -a actions
+                actions=('create:Create a new managed account' 'reauth:Reauthenticate an existing one')
+                _describe 'action' actions
+            fi
+            return
+            ;;
+        --result-file)
+            [[ "$cmd" == account-action ]] && _files
+            return
+            ;;
     esac
 
     if [[ "$cur" == -* ]]; then
@@ -111,6 +129,7 @@ _claude_acc_completion() {
             remove) flags=('--force:Skip confirmation' '-f:Skip confirmation' '--purge:Delete outright instead of moving to the Trash') ;;
             lock) flags=('--force:Re-pin to the identity signed in now' '-f:Re-pin to the identity signed in now') ;;
             import) flags=('--move:Move the directory instead of copying it') ;;
+            account-action) flags=('--json:Machine mode (required)' '--probe:Report contract version and capabilities' '--action:create or reauth' '--account:Target managed account' '--result-file:Where to write the outcome document' '--seed:Seed a new account from ~/.claude/') ;;
             statusline) flags=('--install:Write the statusLine config into settings.json') ;;
             sessions) flags=('--all:Every project, not just this directory') ;;
             list) flags=('--json:Output as JSON') ;;

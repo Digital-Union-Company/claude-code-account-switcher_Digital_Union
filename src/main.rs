@@ -69,6 +69,36 @@ enum Commands {
     },
     /// Re-login to an account
     Login { name: String },
+    /// Machine-only account create / reauthenticate action contract (CM9)
+    ///
+    /// Drives a managed-account create or reauth for a GUI without the
+    /// operator hand-typing `add`/`login`, while claude-acc keeps sole
+    /// ownership of identity, credentials and the OAuth interaction. The
+    /// caller hosts the terminal (the interactive `claude auth login` runs in
+    /// it); the single non-secret outcome document is written to
+    /// `--result-file` — never a token or code. Use `--probe` for
+    /// capability/version discovery without authenticating. Humans use
+    /// `add`/`login` instead.
+    AccountAction {
+        /// Required: selects the machine contract (human use is add/login).
+        #[arg(long)]
+        json: bool,
+        /// Report contract version and capabilities; performs no authentication.
+        #[arg(long, conflicts_with_all = ["action", "account", "result_file", "seed"])]
+        probe: bool,
+        /// "create" a new managed account, or "reauth" an existing one.
+        #[arg(long, required_unless_present = "probe")]
+        action: Option<String>,
+        /// Target managed account name.
+        #[arg(long, required_unless_present = "probe")]
+        account: Option<String>,
+        /// Path to write the single non-secret outcome document to.
+        #[arg(long = "result-file", required_unless_present = "probe")]
+        result_file: Option<String>,
+        /// For create: seed the new account dir from ~/.claude/.
+        #[arg(long)]
+        seed: bool,
+    },
     /// Remove account
     ///
     /// The directory goes to the Trash, so a mistyped name costs a drag back
@@ -387,6 +417,7 @@ fn is_machine_mode(command: &Option<Commands>) -> bool {
             | Some(Commands::Usage { json: true })
             | Some(Commands::Doctor { json: true })
             | Some(Commands::Link { json: true, .. })
+            | Some(Commands::AccountAction { json: true, .. })
     )
 }
 
@@ -414,6 +445,10 @@ fn should_show_update_hint(command: &Option<Commands>) -> bool {
             | Some(Commands::Doctor { .. })
             | Some(Commands::Update { .. })
             | Some(Commands::Run { .. })
+            // Hosts an interactive `claude auth login` in the caller's terminal
+            // and/or emits its own machine document — a passive hint would
+            // either be stale by the time the login ends or pollute the output.
+            | Some(Commands::AccountAction { .. })
             | Some(Commands::Cloud { .. })
             | Some(Commands::Teleport { .. })
             | Some(Commands::Session { .. })
@@ -440,8 +475,14 @@ fn main() {
     // effect. Its own handler refuses a missing store with a structured
     // `NOT_INITIALIZED` instead (docs/machine-api.md). Every other command,
     // including the read-only `--json` ones, still initializes as before.
-    let machine_link = matches!(cli.command, Some(Commands::Link { json: true, .. }));
-    if !machine_link {
+    // `account-action` never initializes either (F4): capability discovery
+    // (`--probe`) must touch nothing, and a create/reauth must not let an
+    // invalid or refused request manufacture routing state as a side effect —
+    // it requires an already-initialized store and refuses an absent one with a
+    // structured `NOT_INITIALIZED` (docs/machine-api.md).
+    let skip_init = matches!(cli.command, Some(Commands::Link { json: true, .. }))
+        || matches!(cli.command, Some(Commands::AccountAction { .. }));
+    if !skip_init {
         match config.init() {
             Ok(()) => {}
             // A `--json` invocation must still produce its one structured JSON
@@ -481,6 +522,22 @@ fn main() {
             &config, &i18n, &name, &source, move_into,
         )),
         Some(Commands::Login { name }) => commands::login::run(&config, &i18n, &name),
+        Some(Commands::AccountAction {
+            json,
+            probe,
+            action,
+            account,
+            result_file,
+            seed,
+        }) => std::process::exit(commands::account_action::run_json(
+            &config,
+            json,
+            probe,
+            action.as_deref(),
+            account.as_deref(),
+            result_file.as_deref(),
+            seed,
+        )),
         Some(Commands::Remove { force, purge, name }) => {
             commands::remove::run(&config, &i18n, &name, force, purge)
         }
@@ -725,6 +782,14 @@ mod tests {
         })));
         assert!(is_machine_mode(&Some(Commands::Usage { json: true })));
         assert!(is_machine_mode(&Some(Commands::Doctor { json: true })));
+        assert!(is_machine_mode(&Some(Commands::AccountAction {
+            json: true,
+            probe: true,
+            action: None,
+            account: None,
+            result_file: None,
+            seed: false,
+        })));
 
         assert!(!is_machine_mode(&Some(Commands::List { json: false })));
         assert!(!is_machine_mode(&Some(Commands::Links { json: false })));

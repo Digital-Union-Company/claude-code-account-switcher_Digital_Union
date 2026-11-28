@@ -32,7 +32,7 @@ _claude_acc_complete() {
     sub="${COMP_WORDS[2]}"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "list add login remove default reset lock link unlink links status usage sessions session desktop vscode resume-hook statusline update install run cloud teleport doctor whoami clone-settings import help" -- "$cur"))
+        COMPREPLY=($(compgen -W "list add login remove default reset lock link unlink links status usage sessions session desktop vscode resume-hook statusline update install run cloud teleport doctor whoami clone-settings import account-action help" -- "$cur"))
         return
     fi
 
@@ -61,6 +61,20 @@ _claude_acc_complete() {
             [[ "$cmd" == status ]] && COMPREPLY=($(compgen -d -- "$cur"))
             return
             ;;
+        --account)
+            # `account-action --account` takes a managed account name.
+            [[ "$cmd" == account-action ]] &&
+                COMPREPLY=($(compgen -W "$('__CLAUDE_ACC_BIN__' completions accounts)" -- "$cur"))
+            return
+            ;;
+        --action)
+            [[ "$cmd" == account-action ]] && COMPREPLY=($(compgen -W "create reauth" -- "$cur"))
+            return
+            ;;
+        --result-file)
+            [[ "$cmd" == account-action ]] && COMPREPLY=($(compgen -f -- "$cur"))
+            return
+            ;;
     esac
 
     if [[ "$cur" == -* ]]; then
@@ -69,6 +83,7 @@ _claude_acc_complete() {
             remove) COMPREPLY=($(compgen -W "--force -f --purge" -- "$cur")) ;;
             lock) COMPREPLY=($(compgen -W "--force -f" -- "$cur")) ;;
             import) COMPREPLY=($(compgen -W "--move" -- "$cur")) ;;
+            account-action) COMPREPLY=($(compgen -W "--json --probe --action --account --result-file --seed" -- "$cur")) ;;
             statusline) COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
             sessions) COMPREPLY=($(compgen -W "--all" -- "$cur")) ;;
             list) COMPREPLY=($(compgen -W "--json" -- "$cur")) ;;

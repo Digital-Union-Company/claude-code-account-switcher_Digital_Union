@@ -30,6 +30,19 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, seed_from_default: bool)
         std::process::exit(1);
     }
 
+    // Hold the per-account lifecycle lock for the whole add, so a concurrent
+    // machine `account-action` or human `remove`/`login` of the SAME account
+    // cannot overlap this create+login. Different accounts are unaffected. Fail
+    // closed on a genuine lock-acquisition error rather than proceeding
+    // unguarded (OS error on stderr — no translation applies).
+    let _lifecycle = match config.lock_account_lifecycle_blocking(name) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let acc_dir = config.account_path(name);
     // Reserving the account name — the existence check plus the directory
     // creation — is a routing-relevant inventory write, so it runs under the
@@ -74,10 +87,23 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str, seed_from_default: bool)
     // `claude auth login` can write to the standard account's own Keychain
     // entries as a side effect, even though this login is scoped to
     // acc_dir's CLAUDE_CONFIG_DIR — snapshot/restore undoes that collateral.
-    // See identity::snapshot_side_effect_keychain for why.
-    let keychain_snapshot = identity::snapshot_side_effect_keychain();
-    let code = super::spawn_claude(build_login_process(config, &acc_dir), i18n);
-    identity::restore_side_effect_keychain(keychain_snapshot);
+    // See identity::snapshot_side_effect_keychain for why. The global
+    // auth-side-effect lock (macOS only; a no-op elsewhere) serializes this
+    // bracket against every other cooperating login so two cannot interleave
+    // their snapshot/restore and clobber the standard account's token.
+    let code = {
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
+        let keychain_snapshot = identity::snapshot_side_effect_keychain();
+        let code = super::spawn_claude(build_login_process(config, &acc_dir), i18n);
+        identity::restore_side_effect_keychain(keychain_snapshot);
+        code
+    };
 
     // The account directory stays — it may already be seeded, and `login` is
     // the natural retry. What must not stay is the success banner: printing

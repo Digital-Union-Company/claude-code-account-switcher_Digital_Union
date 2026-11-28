@@ -35,13 +35,36 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
         std::process::exit(1);
     }
 
+    // Hold the per-account lifecycle lock across this re-login so a concurrent
+    // machine `account-action` or human `remove` of the same account cannot
+    // overlap it. Fail closed on a genuine lock-acquisition error.
+    let _lifecycle = match config.lock_account_lifecycle_blocking(name) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
+
     i18n.print(Msg::LoginStart(name.to_string()));
     // See identity::snapshot_side_effect_keychain: `claude auth login` can
     // clobber the standard account's own Keychain entries as a side effect
-    // even when scoped to acc_dir's CLAUDE_CONFIG_DIR.
-    let keychain_snapshot = identity::snapshot_side_effect_keychain();
-    let code = super::spawn_claude(build_login_process(config, Some(&acc_dir)), i18n);
-    identity::restore_side_effect_keychain(keychain_snapshot);
+    // even when scoped to acc_dir's CLAUDE_CONFIG_DIR. The global
+    // auth-side-effect lock (macOS only; a no-op elsewhere) serializes the
+    // snapshot/restore bracket against every other cooperating login.
+    let code = {
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
+        let keychain_snapshot = identity::snapshot_side_effect_keychain();
+        let code = super::spawn_claude(build_login_process(config, Some(&acc_dir)), i18n);
+        identity::restore_side_effect_keychain(keychain_snapshot);
+        code
+    };
     if code != 0 {
         std::process::exit(code);
     }
@@ -58,8 +81,30 @@ pub fn run(config: &AppConfig, i18n: &I18n, name: &str) {
 /// here — unlike logging into a *different* account, this login is meant to
 /// change the standard account's own credentials.
 fn login_default(config: &AppConfig, i18n: &I18n) {
+    // No keychain snapshot/restore here — this login is meant to change the
+    // standard account's own credentials. But it still takes the global
+    // auth-side-effect lock (macOS only; a no-op elsewhere): a managed login's
+    // snapshot/restore bracket would otherwise race this and either clobber the
+    // new standard-account token or be clobbered by it. Also holds the "default"
+    // lifecycle lock so two standard-account logins do not overlap.
+    let _lifecycle = match config.lock_account_lifecycle_blocking("default") {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("account lock unavailable: {e}");
+            std::process::exit(1);
+        }
+    };
     i18n.print(Msg::LoginStart("default".to_string()));
-    let code = super::spawn_claude(build_login_process(config, None), i18n);
+    let code = {
+        let _auth = match config.lock_auth_side_effect_blocking() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("authentication lock unavailable: {e}");
+                std::process::exit(1);
+            }
+        };
+        super::spawn_claude(build_login_process(config, None), i18n)
+    };
     if code != 0 {
         std::process::exit(code);
     }
