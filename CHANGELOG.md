@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.23.0...v0.24.0) (2026-11-28)
+
+
+### Features
+
+* add account-action machine contract for GUI account create and reauth ([#11](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/issues/11)) ([58af035](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/commit/58af035a77c727f82568b1c55bcf4942b0ea56d1))
+
 ## [0.23.0](https://github.com/Digital-Union-Company/claude-code-account-switcher_Digital_Union/compare/v0.22.0...v0.23.0) (2026-11-25)
 
 
